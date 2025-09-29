@@ -1,0 +1,7 @@
+{
+    "id": "robot_1",
+    "targets": ["target_1", "target_2"],
+    "hard_turn_threshold": 0.5,
+    "linear_speed": 0.22,
+    "angular_speed": 0.1
+}
