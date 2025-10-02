@@ -1,18 +1,22 @@
 """ROS2 IMPORTS"""
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import TwistStamped
 from std_msgs.msg import Header
-from tf_transformations import euler_from_quaternion
+from builtin_interfaces.msg import Time
 from mocap4r2_msgs.msg import RigidBodies
+from geometry_msgs.msg import TwistStamped
+from tf_transformations import euler_from_quaternion
+from controller_real_world.msg import CommitmentState
 from ament_index_python.packages import get_package_share_directory
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
 
 """PYTHON IMPORTS"""
-import math
-import threading
 import os
+import math
 import json
 import random
+import threading
 import numpy as np
 
 #======================define global pose variable=========================
@@ -48,13 +52,23 @@ class Options():
 opt = Options()
 #==================================================================
 
+#====================== QoS Profile for Commitment States ======================
+
+commitment_qos = QoSProfile(
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1
+)
+#===============================================================================
                 
 #====================== Controller Node ======================
 
 class ControllerNode(Node):
     def __init__(self):
-        super().__init__('controller_node')
+        super().__init__('controller_node_' + opt.id)
 
+        # --------- Parameters ---------
         self.id = opt.id
         # Pick a random target commitment from the list (if not empty)
         if opt.targets:
@@ -69,13 +83,39 @@ class ControllerNode(Node):
         self.goal_tolerance = opt.goal_tolerance
         self.hard_turn_threshold = opt.hard_turn_threshold
         self.soft_turn_threshold = opt.soft_turn_threshold
-        self.kp_angle = 0.5  # Proportional gain for angle correction
+        self.kp_angle = opt.kp_angle  # Proportional gain for angle correction
+        #------------------------------
 
         # --- State ---
         self.yaw = 0.0
         self.pos_message = {}
 
+        # Commitment quality (0 to 1)
+        self.quality = 1.0
+        # -------------
+
         # --- ROS Interfaces ---
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
+        self.pub = self.create_publisher(CommitmentState, 'commitments', qos)
+        self.robot_id = robot_id
+        self.seq = 0
+        # Publish commitment state every second (heartbeat)
+        self.timer_pub = self.create_timer(1.0, self.publish_commitment_state)
+        # Listen to other robots' commitments/opinions
+        self.sub = self.create_subscription(
+            CommitmentState,
+            'commitments',
+            self.listener_cb,
+            qos
+        )
+
+
         self.odom_sub = self.create_subscription(
             RigidBodies,
             "/rigid_bodies",
@@ -88,6 +128,23 @@ class ControllerNode(Node):
 
         self.get_logger().info(f"Controller node started. Target commitment: {self.target_commitment}")
 
+    def publish_state(self):
+        msg = CommitmentState()
+        msg.robot_id = self.id
+        msg.stamp = self.get_clock().now().to_msg()
+        msg.seq = self.seq
+        msg.commitment = self.commitment
+        msg.quality = self.quality
+        self.pub.publish(msg)
+        self.get_logger().debug(f'Published commitment {msg.commitment}')
+        self.seq += 1
+
+    def listener_cb(self, msg: CommitmentState):
+        self.commitments[msg.robot_id] = msg
+        self.get_logger().info(
+            f'[{self.get_name()}] {msg.robot_id} committed to {msg.commitment}'
+        )
+        
     def odom_callback(self, msg: RigidBodies):
         """Update robot pose from odometry."""
         for rb in msg.rigidbodies:
