@@ -19,7 +19,7 @@ def generate_launch_description():
         # Start control.py node
         Node(
             package='controller_real_world',
-            executable='controller_real_world',
+            executable='controller_node',
             name='controller_real_world',
             output='screen',
             arguments=[LaunchConfiguration('param_file')]
