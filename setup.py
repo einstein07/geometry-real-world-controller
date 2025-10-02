@@ -24,7 +24,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'controller_real_world = controller_real_world.ringattcontroller_real_worldractor:main',
+            'controller_node = controller_real_world.controller_node:main',
         ],
     },
 )
