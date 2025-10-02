@@ -1,7 +1,8 @@
 """ROS2 IMPORTS"""
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import TwistStamped
+from std_msgs.msg import Header
 from tf_transformations import euler_from_quaternion
 from mocap4r2_msgs.msg import RigidBodies
 from ament_index_python.packages import get_package_share_directory
@@ -12,6 +13,7 @@ import threading
 import os
 import json
 import random
+import numpy as np
 
 #======================define global pose variable=========================
 pos_message_g = {}
@@ -19,7 +21,7 @@ pos_lock = threading.Lock()
 #==========================================================================
 
 #======================define parameters=============================
-package_name = 'ringattractor'
+package_name = 'controller_real_world'
 
 param_file = os.path.join(
     get_package_share_directory(package_name),
@@ -38,8 +40,10 @@ class Options():
         self.angular_speed = float(parameters["angular_speed"]) # radians (~5.73°)
 
         self.targets = parameters.get("targets", [])
-        self.hard_turn_threshold = float(parameters.get("hard_turn_threshold", 0.5)) # radians (~28.65°)
-        self.goal_tolerance = float(parameters.get("goal_tolerance", 0.1))
+        self.soft_turn_threshold = float(parameters.get("soft_turn_threshold", 0.08727)) # radians (~5°)
+        self.hard_turn_threshold = float(parameters.get("hard_turn_threshold", 0.17453)) # radians (~10°)
+        self.goal_tolerance = float(parameters.get("goal_tolerance", 0.5))
+        self.kp_angle = float(parameters.get("kp_angle", 0.5)) # Proportional gain for angle correction # radians (~28.65°)
 
 opt = Options()
 #==================================================================
@@ -64,6 +68,8 @@ class ControllerNode(Node):
         self.angular_speed = opt.angular_speed
         self.goal_tolerance = opt.goal_tolerance
         self.hard_turn_threshold = opt.hard_turn_threshold
+        self.soft_turn_threshold = opt.soft_turn_threshold
+        self.kp_angle = 0.5  # Proportional gain for angle correction
 
         # --- State ---
         self.yaw = 0.0
@@ -76,33 +82,34 @@ class ControllerNode(Node):
             self.odom_callback,
             10)
         
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_pub = self.create_publisher(TwistStamped, '/turtlebot4_3/cmd_vel', 10)
         # Moves 0.022 meters (2.2 cm) per update at 10 Hz 
         self.timer = self.create_timer(0.1, self.control_loop)
 
         self.get_logger().info(f"Controller node started. Target commitment: {self.target_commitment}")
 
-    def odom_callback(self, msg):
+    def odom_callback(self, msg: RigidBodies):
         """Update robot pose from odometry."""
-        for i in range(msg.n):
-            if msg.rigidbodies[i].rigid_body_name == self.id:
+        for rb in msg.rigidbodies:
+            if rb.rigid_body_name == self.id:
                 # Update the current position with the received data
-                self.pos_message['self'] = msg.rigidbodies[i].pose
+                self.pos_message['self'] = rb.pose
             else:
-                self.pos_message[msg.rigidbodies[i].rigid_body_name] = msg.rigidbodies[i].pose
+                self.pos_message[rb.rigid_body_name] = rb.pose
 
 
         # Quaternion -> yaw
-        q = msg.pose.pose.orientation
+        q = self.pos_message['self'].orientation
         _, _, self.yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
 
     def control_loop(self):
         """Control loop: hard-turn if needed, else drive straight."""
         if not self.pos_message or 'self' not in self.pos_message or self.target_commitment not in self.pos_message:
             self.get_logger().warn("Waiting for valid position data...")
+            self.get_logger().warn(f"Current pos_message keys: {list(self.pos_message.keys())}")
             return
-        dx = self.pos_message[self.target_commitment].pose.position.x - self.pos_message['self'].pose.position.x 
-        dy = self.pos_message[self.target_commitment].pose.position.y - self.pos_message['self'].pose.position.y 
+        dx = self.pos_message[self.target_commitment].position.x - self.pos_message['self'].position.x 
+        dy = self.pos_message[self.target_commitment].position.y - self.pos_message['self'].position.y 
         distance = math.hypot(dx, dy)
 
         # Stop if goal reached
@@ -112,21 +119,38 @@ class ControllerNode(Node):
             return
 
         # Desired heading
-        target_angle = math.atan2(dy, dx)
-        angle_error = self.normalize_angle(target_angle - self.yaw)
+        target_angle = math.atan2(dy, dx) - math.pi/2
+        angle_error = self.wrap_angle(target_angle - self.yaw)
+        self.get_logger().info(f"Current target commitment: {self.target_commitment}, Current yaw: {math.degrees(self.yaw):.2f}° Distance to target: {distance:.2f}, Angle to target: {math.degrees(target_angle):.2f}°, Angle error: {math.degrees(angle_error):.2f}°")
 
-        twist = Twist()
+        msg = TwistStamped()
+        msg.header = Header()
+        msg.header.frame_id = 'base_link'  # Set the frame_id
+        msg.header.stamp = self.get_clock().now().to_msg()  # Set the timestamp
+        msg.twist.linear.y = 0.0
+        msg.twist.linear.z = 0.0
+        msg.twist.angular.x = 0.0
+        msg.twist.angular.y = 0.0
 
         if abs(angle_error) > self.hard_turn_threshold:
-            # Hard turn in place
-            twist.angular.z = self.angular_speed * (1 if angle_error > 0 else -1)
-            self.get_logger().debug("Hard turning...")
-        else:
-            # Go straight towards target
-            twist.linear.x = self.linear_speed
-            self.get_logger().debug("Moving straight...")
+            # Turn in place for very large errors
+            msg.twist.angular.z = self.angular_speed * (1 if angle_error > 0 else -1)
+            msg.twist.linear.x = 0.0
+        elif abs(angle_error) < self.hard_turn_threshold and abs(angle_error) > self.soft_turn_threshold:
+            # Curve while moving
+            msg.twist.linear.x = self.linear_speed
+            # Proportional controller for angular velocity
+            msg.twist.angular.z = msg.twist.angular.z = max(-self.angular_speed,
+                                                            min(self.kp_angle * angle_error, self.angular_speed))
 
-        self.cmd_pub.publish(twist)
+        else:
+            # Go mostly straight
+            msg.twist.linear.x = self.linear_speed
+            msg.twist.angular.z = 0.0
+
+
+        self.cmd_pub.publish(msg)
+        self.get_logger().info(f"Published cmd_vel: linear.x={msg.twist.linear.x}, angular.z={msg.twist.angular.z}")
 
     def stop_robot(self):
         """Publish zero velocities."""
@@ -140,6 +164,10 @@ class ControllerNode(Node):
         while angle < -math.pi:
             angle += 2 * math.pi
         return angle
+
+    @staticmethod
+    def wrap_angle(angle):
+        return (angle + np.pi) % (2 * np.pi) - np.pi
 
 
 def main(args=None):
