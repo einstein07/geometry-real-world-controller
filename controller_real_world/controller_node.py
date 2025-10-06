@@ -49,6 +49,9 @@ class Options():
         self.kp_angle = float(parameters.get("kp_angle", 0.5)) # Proportional gain for angle correction # radians (~28.65°)
         self.qtm_ip = parameters.get("qtm_ip", "10.111.20.20")  # Add QTM server IP to parameters
 
+        self.update_rate = int(parameters.get("update_rate", 10)) # time steps
+        self.eta = float(parameters.get("eta", 0.1)) # weight for neighbor influence
+
 opt = Options()
 #==================================================================
 
@@ -69,6 +72,9 @@ class ControllerNode(Node):
         super().__init__('controller_node_' + opt.id)
 
         # --------- Parameters ---------
+        self.update_rate = opt.update_rate   # time steps
+        self.counter = math.random.randint(0, self.update_rate)
+        self.eta = opt.eta # weight for neighbor influence
         self.id = opt.id
         # Pick a random target commitment from the list (if not empty)
         if opt.targets:
@@ -77,6 +83,7 @@ class ControllerNode(Node):
             self.target_commitment = 0  # or handle default
             print("No targets available in parameters.")
             return
+        self.publishable_commitment = self.target_commitment
         
         self.linear_speed = opt.linear_speed
         self.angular_speed = opt.angular_speed
@@ -107,8 +114,7 @@ class ControllerNode(Node):
         self.pub = self.create_publisher(CommitmentState, 'commitments', qos)
         self.robot_id = self.id
         self.seq = 0
-        # Publish commitment state every second (heartbeat)
-        self.timer_pub = self.create_timer(1.0, self.publish_commitment_state)
+        
         # Listen to other robots' commitments/opinions
         self.sub = self.create_subscription(
             CommitmentState,
@@ -196,7 +202,7 @@ class ControllerNode(Node):
         msg.robot_id = self.id
         msg.stamp = self.get_clock().now().to_msg()
         msg.seq = self.seq
-        msg.commitment = self.commitment
+        msg.commitment = self.publishable_commitment
         msg.quality = self.quality
         self.pub.publish(msg)
         self.get_logger().debug(f'Published commitment {msg.commitment}')
@@ -208,7 +214,21 @@ class ControllerNode(Node):
             f'[{self.get_name()}] {msg.robot_id} committed to {msg.commitment}'
         )
 
-    def control_loop(self):
+    def update_target_commitment(self):
+        if self.counter % self.update_rate == 0:
+            if math.random.random() < self.eta:
+                self.target_commitment = random.randrange(len(opt.targets))
+            else:
+                # Pick random neighbor's commitment
+                if self.commitments:
+                    neighbor = random.choice(list(self.commitments.values()))
+                    # Check if value is not 0, if 0 keep own commitment
+                    if neighbor.commitment != 0:    
+                        self.target_commitment = neighbor.commitment
+                # Clear commitments to avoid bias
+                self.commitments = {}
+            
+    def update_robot_movement(self):
         """Control loop: hard-turn if needed, else drive straight."""
         with self.pos_lock:
             if not self.pos_message or 'self' not in self.pos_message or opt.targets[self.target_commitment] not in self.pos_message:
@@ -257,6 +277,11 @@ class ControllerNode(Node):
             # Turn in place for very large errors
             msg.twist.angular.z = self.angular_speed * (1 if angle_error > 0 else -1)
             msg.twist.linear.x = 0.0
+            # during a hard turn, publish commitment 0
+            self.publishable_commitment = 0
+
+            self.publish_commitment_state()  # Immediately publish the change
+
         elif abs(angle_error) < self.hard_turn_threshold and abs(angle_error) > self.soft_turn_threshold:
             self.get_logger().info("Soft turn needed")
             # Curve while moving
@@ -264,15 +289,26 @@ class ControllerNode(Node):
             # Proportional controller for angular velocity
             msg.twist.angular.z = max(-self.angular_speed,
                                       min(self.kp_angle * angle_error, self.angular_speed))
-
+            # during a soft turn, publish target commitment
+            self.publishable_commitment = self.target_commitment    
+            self.publish_commitment_state()  # Immediately publish the change
         else:
             self.get_logger().info("Going straight")
             # Go mostly straight
             msg.twist.linear.x = self.linear_speed
             msg.twist.angular.z = 0.0
+            # when going straight, publish target commitment
+            self.publishable_commitment = self.target_commitment
+            self.publish_commitment_state()  # Immediately publish the change
 
         self.cmd_pub.publish(msg)
         self.get_logger().info(f"Published cmd_vel: linear.x={msg.twist.linear.x}, angular.z={msg.twist.angular.z}")
+
+    def control_loop(self):
+        """Update target commitment and execute movement."""
+        self.update_target_commitment()
+        self.update_robot_movement()
+        self.counter += 1
 
     def stop_robot(self):
         """Publish zero velocities."""
@@ -288,14 +324,6 @@ class ControllerNode(Node):
         msg.twist.angular.z = 0.0
         self.cmd_pub.publish(msg)
 
-    @staticmethod
-    def normalize_angle(angle):
-        """Keep angle between -pi and pi."""
-        while angle > math.pi:
-            angle -= 2 * math.pi
-        while angle < -math.pi:
-            angle += 2 * math.pi
-        return angle
 
     @staticmethod
     def wrap_angle(angle):
