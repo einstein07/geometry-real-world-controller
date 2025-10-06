@@ -124,8 +124,8 @@ class ControllerNode(Node):
             qos
         )
         self.robot_namespace = opt.robot_namespace
-        
-        self.cmd_pub = self.create_publisher(TwistStamped, '/{self.robot_namespace}/cmd_vel', 10)
+
+        self.cmd_pub = self.create_publisher(TwistStamped, f'/{self.robot_namespace}/cmd_vel', 10)
         # Moves 0.022 meters (2.2 cm) per update at 10 Hz 
         self.timer = self.create_timer(0.1, self.control_loop)
 
