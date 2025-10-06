@@ -73,7 +73,7 @@ class ControllerNode(Node):
 
         # --------- Parameters ---------
         self.update_rate = opt.update_rate   # time steps
-        self.counter = math.random.randint(0, self.update_rate)
+        self.counter = random.randint(0, self.update_rate)
         self.eta = opt.eta # weight for neighbor influence
         self.id = opt.id
         # Pick a random target commitment from the list (if not empty)
@@ -216,7 +216,7 @@ class ControllerNode(Node):
 
     def update_target_commitment(self):
         if self.counter % self.update_rate == 0:
-            if math.random.random() < self.eta:
+            if random.random() < self.eta:
                 self.target_commitment = random.randrange(len(opt.targets))
             else:
                 # Pick random neighbor's commitment

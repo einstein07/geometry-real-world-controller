@@ -5,5 +5,7 @@
     "hard_turn_threshold": 0.17453,
     "linear_speed": 0.22,
     "angular_speed": 0.1,
-    "kp_angle": 0.5
+    "kp_angle": 0.5,
+    "update_rate": 5,
+    "eta": 0.1
 }
