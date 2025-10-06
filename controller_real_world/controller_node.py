@@ -38,6 +38,7 @@ class Options():
     def __init__(self):
         
         self.id = parameters["id"]
+        self.robot_namespace = parameters.get("robot_namespace")
         
         self.linear_speed = float(parameters["linear_speed"])
         self.angular_speed = float(parameters["angular_speed"]) # radians (~5.73°)
@@ -122,8 +123,9 @@ class ControllerNode(Node):
             self.listener_cb,
             qos
         )
+        self.robot_namespace = opt.robot_namespace
         
-        self.cmd_pub = self.create_publisher(TwistStamped, '/turtlebot4_3/cmd_vel', 10)
+        self.cmd_pub = self.create_publisher(TwistStamped, '/{self.robot_namespace}/cmd_vel', 10)
         # Moves 0.022 meters (2.2 cm) per update at 10 Hz 
         self.timer = self.create_timer(0.1, self.control_loop)
 

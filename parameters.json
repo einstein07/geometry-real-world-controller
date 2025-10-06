@@ -1,5 +1,6 @@
 {
     "id": "Turtlebot3",
+    "robot_namespace": "",
     "targets": ["Turtlebot4", "Turtlebot7"],
     "soft_turn_threshold": 0.08727, 
     "hard_turn_threshold": 0.17453,
