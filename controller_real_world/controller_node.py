@@ -3,13 +3,11 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Header
 from builtin_interfaces.msg import Time
-from mocap4r2_msgs.msg import RigidBodies
-from geometry_msgs.msg import TwistStamped
-from tf_transformations import euler_from_quaternion
-from controller_real_world.msg import CommitmentState
+from geometry_msgs.msg import TwistStamped, Twist, Pose
+from tf_transformations import euler_from_quaternion, quaternion_from_matrix
+from controller_msgs.msg import CommitmentState
 from ament_index_python.packages import get_package_share_directory
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-
 
 """PYTHON IMPORTS"""
 import os
@@ -18,10 +16,11 @@ import json
 import random
 import threading
 import numpy as np
+import asyncio
+import qtm
+import xml.etree.ElementTree as ET
 
-#======================define global pose variable=========================
-pos_message_g = {}
-pos_lock = threading.Lock()
+
 #==========================================================================
 
 #======================define parameters=============================
@@ -48,6 +47,7 @@ class Options():
         self.hard_turn_threshold = float(parameters.get("hard_turn_threshold", 0.17453)) # radians (~10°)
         self.goal_tolerance = float(parameters.get("goal_tolerance", 0.5))
         self.kp_angle = float(parameters.get("kp_angle", 0.5)) # Proportional gain for angle correction # radians (~28.65°)
+        self.qtm_ip = parameters.get("qtm_ip", "10.111.20.20")  # Add QTM server IP to parameters
 
 opt = Options()
 #==================================================================
@@ -72,9 +72,9 @@ class ControllerNode(Node):
         self.id = opt.id
         # Pick a random target commitment from the list (if not empty)
         if opt.targets:
-            self.target_commitment = random.choice(opt.targets)
+            self.target_commitment = random.randrange(len(opt.targets))
         else:
-            self.target_commitment = None  # or handle default
+            self.target_commitment = 0  # or handle default
             print("No targets available in parameters.")
             return
         
@@ -84,13 +84,15 @@ class ControllerNode(Node):
         self.hard_turn_threshold = opt.hard_turn_threshold
         self.soft_turn_threshold = opt.soft_turn_threshold
         self.kp_angle = opt.kp_angle  # Proportional gain for angle correction
+        self.qtm_ip = opt.qtm_ip  # QTM server IP
         #------------------------------
 
         # --- State ---
-        self.yaw = 0.0
         self.pos_message = {}
-
-        # Commitment quality (0 to 1)
+        self.pos_lock = threading.Lock()
+        self.rb_names = []
+        self.commitments = {}
+        self.commitment = self.target_commitment
         self.quality = 1.0
         # -------------
 
@@ -103,7 +105,7 @@ class ControllerNode(Node):
         )
 
         self.pub = self.create_publisher(CommitmentState, 'commitments', qos)
-        self.robot_id = robot_id
+        self.robot_id = self.id
         self.seq = 0
         # Publish commitment state every second (heartbeat)
         self.timer_pub = self.create_timer(1.0, self.publish_commitment_state)
@@ -114,21 +116,82 @@ class ControllerNode(Node):
             self.listener_cb,
             qos
         )
-
-
-        self.odom_sub = self.create_subscription(
-            RigidBodies,
-            "/rigid_bodies",
-            self.odom_callback,
-            10)
         
         self.cmd_pub = self.create_publisher(TwistStamped, '/turtlebot4_3/cmd_vel', 10)
         # Moves 0.022 meters (2.2 cm) per update at 10 Hz 
         self.timer = self.create_timer(0.1, self.control_loop)
 
-        self.get_logger().info(f"Controller node started. Target commitment: {self.target_commitment}")
+        # Setup QTM connection in a separate thread
+        self._loop = asyncio.new_event_loop()
+        self._connection = None
+        self._thread = threading.Thread(target=self._run_rt, daemon=True)
+        self._thread.start()
 
-    def publish_state(self):
+        self.get_logger().info(f"Controller node started. Target commitment: {opt.targets[self.target_commitment]}")
+
+    def _run_rt(self):
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._rt_protocol())
+        self._loop.run_forever()
+
+    async def _rt_protocol(self):
+        try:
+            self._connection = await qtm.connect(self.qtm_ip, version="1.22")
+            if self._connection is None:
+                self.get_logger().error(f"Failed to connect to QTM server at {self.qtm_ip}")
+                return
+
+            xml_string = await self._connection.get_parameters(parameters=["6d"])
+            if not xml_string:
+                self.get_logger().error("Failed to retrieve 6D parameters from QTM")
+                return
+
+            root = ET.fromstring(xml_string)
+            self.rb_names = [body.find("Name").text for body in root.iter("Body")]
+            self.get_logger().info(f"Found rigid bodies: {self.rb_names}")
+
+            await self._connection.stream_frames(components=["6d"], on_packet=self._on_packet)
+        except Exception as e:
+            self.get_logger().error(f"Error in QTM connection: {str(e)}")
+
+    def _on_packet(self, packet):
+        try:
+            header, rbs = packet.get_6d()
+            if not rbs:
+                self.get_logger().warn("No 6D rigid body data received")
+                return
+
+            with self.pos_lock:
+                temp = {}
+                for i, ((x, y, z), rotation) in enumerate(rbs):
+                    if i >= len(self.rb_names):
+                        continue
+                    name = self.rb_names[i]
+                    pose = Pose()
+                    pose.position.x = x / 1000.0  # Convert mm to m
+                    pose.position.y = y / 1000.0
+                    pose.position.z = z / 1000.0
+
+                    # Convert rotation matrix to quaternion
+                    matrix = np.reshape(np.array(rotation.matrix), (3, 3))
+                    homogeneous = np.eye(4)
+                    homogeneous[:3, :3] = matrix
+                    q = quaternion_from_matrix(homogeneous)
+                    pose.orientation.x = float(q[0])
+                    pose.orientation.y = float(q[1])
+                    pose.orientation.z = float(q[2])
+                    pose.orientation.w = float(q[3])
+
+                    if name == self.id:
+                        temp['self'] = pose
+                    else:
+                        temp[name] = pose
+
+                self.pos_message = temp
+        except Exception as e:
+            self.get_logger().error(f"Error processing QTM packet: {str(e)}")
+
+    def publish_commitment_state(self):
         msg = CommitmentState()
         msg.robot_id = self.id
         msg.stamp = self.get_clock().now().to_msg()
@@ -144,29 +207,18 @@ class ControllerNode(Node):
         self.get_logger().info(
             f'[{self.get_name()}] {msg.robot_id} committed to {msg.commitment}'
         )
-        
-    def odom_callback(self, msg: RigidBodies):
-        """Update robot pose from odometry."""
-        for rb in msg.rigidbodies:
-            if rb.rigid_body_name == self.id:
-                # Update the current position with the received data
-                self.pos_message['self'] = rb.pose
-            else:
-                self.pos_message[rb.rigid_body_name] = rb.pose
-
-
-        # Quaternion -> yaw
-        q = self.pos_message['self'].orientation
-        _, _, self.yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
 
     def control_loop(self):
         """Control loop: hard-turn if needed, else drive straight."""
-        if not self.pos_message or 'self' not in self.pos_message or self.target_commitment not in self.pos_message:
-            self.get_logger().warn("Waiting for valid position data...")
-            self.get_logger().warn(f"Current pos_message keys: {list(self.pos_message.keys())}")
-            return
-        dx = self.pos_message[self.target_commitment].position.x - self.pos_message['self'].position.x 
-        dy = self.pos_message[self.target_commitment].position.y - self.pos_message['self'].position.y 
+        with self.pos_lock:
+            if not self.pos_message or 'self' not in self.pos_message or opt.targets[self.target_commitment] not in self.pos_message:
+                self.get_logger().warn("Waiting for valid position data...")
+                self.get_logger().warn(f"Current pos_message keys: {list(self.pos_message.keys())}")
+                return
+            pos_message_copy = self.pos_message.copy()
+
+        dx = pos_message_copy[opt.targets[self.target_commitment]].position.x - pos_message_copy['self'].position.x 
+        dy = pos_message_copy[opt.targets[self.target_commitment]].position.y - pos_message_copy['self'].position.y 
         distance = math.hypot(dx, dy)
 
         # Stop if goal reached
@@ -175,10 +227,21 @@ class ControllerNode(Node):
             self.get_logger().info("Goal reached!")
             return
 
+        # Compute current yaw
+        q = pos_message_copy['self'].orientation
+        _, _, yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
+        
+        """CCW rotations give negative yaw → Qualisys yaw is 
+        opposite sign to the atan2 convention), convert by negating:"""
+        yaw = -yaw
+
         # Desired heading
-        target_angle = math.atan2(dy, dx) - math.pi/2
-        angle_error = self.wrap_angle(target_angle - self.yaw)
-        self.get_logger().info(f"Current target commitment: {self.target_commitment}, Current yaw: {math.degrees(self.yaw):.2f}° Distance to target: {distance:.2f}, Angle to target: {math.degrees(target_angle):.2f}°, Angle error: {math.degrees(angle_error):.2f}°")
+        target_angle = math.atan2(dy, dx)
+        angle_error = self.wrap_angle(target_angle - yaw)
+        # Break ties at ±180° by slightly preferring one direction
+        if abs(abs(angle_error) - np.pi) < 0.05:
+            angle_error = -np.pi + 0.1  # Always turn right when a,biguous
+        self.get_logger().info(f"Current target commitment: {opt.targets[self.target_commitment]}, Current yaw: {math.degrees(yaw):.2f}° Distance to target: {distance:.2f}, Angle to target: {math.degrees(target_angle):.2f}°, Angle error: {math.degrees(angle_error):.2f}°")
 
         msg = TwistStamped()
         msg.header = Header()
@@ -190,28 +253,40 @@ class ControllerNode(Node):
         msg.twist.angular.y = 0.0
 
         if abs(angle_error) > self.hard_turn_threshold:
+            self.get_logger().info("Hard turn needed")
             # Turn in place for very large errors
             msg.twist.angular.z = self.angular_speed * (1 if angle_error > 0 else -1)
             msg.twist.linear.x = 0.0
         elif abs(angle_error) < self.hard_turn_threshold and abs(angle_error) > self.soft_turn_threshold:
+            self.get_logger().info("Soft turn needed")
             # Curve while moving
             msg.twist.linear.x = self.linear_speed
             # Proportional controller for angular velocity
-            msg.twist.angular.z = msg.twist.angular.z = max(-self.angular_speed,
-                                                            min(self.kp_angle * angle_error, self.angular_speed))
+            msg.twist.angular.z = max(-self.angular_speed,
+                                      min(self.kp_angle * angle_error, self.angular_speed))
 
         else:
+            self.get_logger().info("Going straight")
             # Go mostly straight
             msg.twist.linear.x = self.linear_speed
             msg.twist.angular.z = 0.0
-
 
         self.cmd_pub.publish(msg)
         self.get_logger().info(f"Published cmd_vel: linear.x={msg.twist.linear.x}, angular.z={msg.twist.angular.z}")
 
     def stop_robot(self):
         """Publish zero velocities."""
-        self.cmd_pub.publish(Twist())
+        msg = TwistStamped()
+        msg.header = Header()
+        msg.header.frame_id = 'base_link'
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.twist.linear.x = 0.0
+        msg.twist.linear.y = 0.0
+        msg.twist.linear.z = 0.0
+        msg.twist.angular.x = 0.0
+        msg.twist.angular.y = 0.0
+        msg.twist.angular.z = 0.0
+        self.cmd_pub.publish(msg)
 
     @staticmethod
     def normalize_angle(angle):
