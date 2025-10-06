@@ -1,6 +1,6 @@
 {
-    "id": "0",
-    "targets": ["1", "2"],
+    "id": "Turtlebot3",
+    "targets": ["Turtlebot4", "Turtlebot7"],
     "soft_turn_threshold": 0.08727, 
     "hard_turn_threshold": 0.17453,
     "linear_speed": 0.22,
