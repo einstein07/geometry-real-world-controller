@@ -11,9 +11,11 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 
 """PYTHON IMPORTS"""
 import os
+import csv
 import math
 import json
 import random
+import datetime
 import threading
 import numpy as np
 import asyncio
@@ -52,6 +54,10 @@ class Options():
 
         self.update_rate = int(parameters.get("update_rate", 10)) # time steps
         self.eta = float(parameters.get("eta", 0.1)) # weight for neighbor influence
+
+        self.base_log_dir = parameters.get('log_directory', './logs')
+        os.makedirs(self.base_log_dir, exist_ok=True)         # If directory does not exist, create it
+        self.experiment_name = parameters.get('experiment_name', 'experiment')
 
 opt = Options()
 #==================================================================
@@ -101,8 +107,15 @@ class ControllerNode(Node):
         self.rb_names = []
         self.commitments = {}
         self.commitment = self.target_commitment
+        self.my_opinions = []
         self.quality = 1.0
         # -------------
+
+        # ----- Logging -----
+        self.base_log_dir = opt.base_log_dir
+        self.experiment_name = opt.experiment_name
+        self.get_logger().info(f"Logging data to: {self.base_log_dir}, Experiment name: {self.experiment_name}")
+        # -------------------
 
         # --- ROS Interfaces ---
         qos = QoSProfile(
@@ -134,7 +147,14 @@ class ControllerNode(Node):
         self._connection = None
         self._thread = threading.Thread(target=self._run_rt, daemon=True)
         self._thread.start()
+        # ----------------------
 
+        # Initialize log files
+        run_folder = os.path.join(self.base_log_dir, self.experiment_name)
+        os.makedirs(run_folder, exist_ok=True)
+        simulation_start_time = datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')
+        self.initialize_log_file(simulation_start_time, run_folder, self.experiment_name)
+        self.initialize_position_log(run_folder)    
         self.get_logger().info(f"Controller node started. Target commitment: {opt.targets[self.target_commitment]}")
 
     def _run_rt(self):
@@ -211,7 +231,7 @@ class ControllerNode(Node):
         self.seq += 1
 
     def listener_cb(self, msg: CommitmentState):
-        self.commitments[msg.robot_id] = msg
+        self.commitments[msg.robot_id] = msg.commitment
         self.get_logger().info(
             f'[{self.get_name()}] {msg.robot_id} committed to {msg.commitment}'
         )
@@ -246,7 +266,7 @@ class ControllerNode(Node):
         # Stop if goal reached
         if distance < self.goal_tolerance:
             self.stop_robot()
-            self.get_logger().info("Goal reached!")
+            #self.get_logger().info("Goal reached!")
             return
 
         # Compute current yaw
@@ -263,7 +283,7 @@ class ControllerNode(Node):
         # Break ties at ±180° by slightly preferring one direction
         if abs(abs(angle_error) - np.pi) < 0.05:
             angle_error = -np.pi + 0.1  # Always turn right when a,biguous
-        self.get_logger().info(f"Current target commitment: {opt.targets[self.target_commitment]}, Current yaw: {math.degrees(yaw):.2f}° Distance to target: {distance:.2f}, Angle to target: {math.degrees(target_angle):.2f}°, Angle error: {math.degrees(angle_error):.2f}°")
+        #self.get_logger().info(f"Current target commitment: {opt.targets[self.target_commitment]}, Current yaw: {math.degrees(yaw):.2f}° Distance to target: {distance:.2f}, Angle to target: {math.degrees(target_angle):.2f}°, Angle error: {math.degrees(angle_error):.2f}°")
 
         msg = TwistStamped()
         msg.header = Header()
@@ -275,7 +295,7 @@ class ControllerNode(Node):
         msg.twist.angular.y = 0.0
 
         if abs(angle_error) > self.hard_turn_threshold:
-            self.get_logger().info("Hard turn needed")
+            #self.get_logger().info("Hard turn needed")
             # Turn in place for very large errors
             msg.twist.angular.z = self.angular_speed * (1 if angle_error > 0 else -1)
             msg.twist.linear.x = 0.0
@@ -284,27 +304,35 @@ class ControllerNode(Node):
 
             self.publish_commitment_state()  # Immediately publish the change
 
+            self.my_opinions.append(self.publishable_commitment)
+
         elif abs(angle_error) < self.hard_turn_threshold and abs(angle_error) > self.soft_turn_threshold:
-            self.get_logger().info("Soft turn needed")
+            #self.get_logger().info("Soft turn needed")
             # Curve while moving
             msg.twist.linear.x = self.linear_speed
             # Proportional controller for angular velocity
             msg.twist.angular.z = max(-self.angular_speed,
                                       min(self.kp_angle * angle_error, self.angular_speed))
             # during a soft turn, publish target commitment
-            self.publishable_commitment = self.target_commitment    
+            self.publishable_commitment = self.target_commitment 
+
             self.publish_commitment_state()  # Immediately publish the change
+
+            self.my_opinions.append(self.publishable_commitment)
         else:
-            self.get_logger().info("Going straight")
+            #self.get_logger().info("Going straight")
             # Go mostly straight
             msg.twist.linear.x = self.linear_speed
             msg.twist.angular.z = 0.0
             # when going straight, publish target commitment
             self.publishable_commitment = self.target_commitment
+
             self.publish_commitment_state()  # Immediately publish the change
 
+            self.my_opinions.append(self.publishable_commitment)
+
         self.cmd_pub.publish(msg)
-        self.get_logger().info(f"Published cmd_vel: linear.x={msg.twist.linear.x}, angular.z={msg.twist.angular.z}")
+        #self.get_logger().info(f"Published cmd_vel: linear.x={msg.twist.linear.x}, angular.z={msg.twist.angular.z}")
 
     def control_loop(self):
         """Update target commitment and execute movement."""
@@ -326,6 +354,43 @@ class ControllerNode(Node):
         msg.twist.angular.z = 0.0
         self.cmd_pub.publish(msg)
 
+    def initialize_position_log(self, run_folder):
+        """Initialize the position log file."""
+        time_stamp = f"{datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')}" # Default experiment name with timestamp
+
+        filename = os.path.join(self.base_log_dir, f"{self.experiment_name}_positions_{time_stamp}.csv")
+        self.position_log = open(filename, "w", newline="")
+        writer = csv.writer(self.position_log)
+        writer.writerow(["Time", "ID", "x", "y"])
+        self.position_writer = writer
+
+    def log_positions_data(self, time_step):
+        """Log all agents' positions for the current timestep."""
+        with self.pos_lock:
+            if not self.pos_message or 'self' not in self.pos_message or opt.targets[self.target_commitment] not in self.pos_message:
+                self.get_logger().warn("Waiting for valid position data...")
+                self.get_logger().warn(f"Current pos_message keys: {list(self.pos_message.keys())}")
+                return
+              
+            self.position_writer.writerow([time_step, self.id, self.pos_message['self'].position.x, self.pos_message['self'].position.y])
+
+    def initialize_opinions_log(self):
+        """Initialize the agent's log file."""
+        time_stamp = f"{datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')}" # Default experiment name with timestamp
+
+        filename = os.path.join(self.base_log_dir, f"{self.experiment_name}_{self.robot_namespace}_{time_stamp}.csv")
+        self.log_file = open(filename, "w", newline="")
+        writer = csv.writer(self.log_file)
+        writer.writerow(["Time", "Commitment", "Opinion, Received Opinions"])
+        self.csv_writer = writer
+
+    def log_opinions_data(self, time_step):
+        """Log the agent's current state."""
+        opinions = ";".join(map(str, self.my_opinions))
+        received_opinions = ";".join(f"{k}:{v}" for k, v in self.commitments.items())        # Log the data to the CSV file
+        
+        self.csv_writer.writerow([time_step, self.commitment, opinions, received_opinions])
+        self.my_opinions.clear()
 
     @staticmethod
     def wrap_angle(angle):
