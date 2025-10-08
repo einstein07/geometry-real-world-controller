@@ -149,12 +149,13 @@ class ControllerNode(Node):
         self._thread.start()
         # ----------------------
 
-        # Initialize log files
+        # ----------- Initialize log files -----------
         run_folder = os.path.join(self.base_log_dir, self.experiment_name)
         os.makedirs(run_folder, exist_ok=True)
-        simulation_start_time = datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')
-        self.initialize_log_file(simulation_start_time, run_folder, self.experiment_name)
-        self.initialize_position_log(run_folder)    
+        self.initialize_opinions_log()
+        self.initialize_position_log()    
+        # ---------------------------------------------
+
         self.get_logger().info(f"Controller node started. Target commitment: {opt.targets[self.target_commitment]}")
 
     def _run_rt(self):
@@ -338,6 +339,8 @@ class ControllerNode(Node):
         """Update target commitment and execute movement."""
         self.update_target_commitment()
         self.update_robot_movement()
+        self.log_opinions_data(self.counter)
+        self.log_positions_data(self.counter)
         self.counter += 1
 
     def stop_robot(self):
@@ -354,7 +357,7 @@ class ControllerNode(Node):
         msg.twist.angular.z = 0.0
         self.cmd_pub.publish(msg)
 
-    def initialize_position_log(self, run_folder):
+    def initialize_position_log(self):
         """Initialize the position log file."""
         time_stamp = f"{datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')}" # Default experiment name with timestamp
 
