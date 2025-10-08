@@ -235,9 +235,9 @@ class ControllerNode(Node):
         if msg.robot_id == self.id:
             return  # Ignore own messages
         self.commitments[msg.robot_id] = msg.commitment
-        self.get_logger().info(
-            f'[{self.get_name()}] {msg.robot_id} committed to {msg.commitment}'
-        )
+        #self.get_logger().info(
+        #    f'[{self.get_name()}] {msg.robot_id} committed to {msg.commitment}'
+        #)
 
     def update_target_commitment(self):
         if self.counter % self.update_rate == 0:
@@ -269,7 +269,10 @@ class ControllerNode(Node):
         # Stop if goal reached
         if distance < self.goal_tolerance:
             self.stop_robot()
-            #self.get_logger().info("Goal reached!")
+            self.get_logger().info("Goal reached!")
+            # Destroy node and shutdown ROS cleanly
+            self.destroy_node()
+            rclpy.shutdown()
             return
 
         # Compute current yaw
