@@ -86,7 +86,7 @@ class ControllerNode(Node):
         self.id = opt.id
         # Pick a random target commitment from the list (if not empty)
         if opt.targets:
-            self.target_commitment = random.randrange(len(opt.targets))
+            self.target_commitment = random.randrange(len(opt.targets)) +1  # +1 to make sure not starting with 0
         else:
             self.target_commitment = 0  # or handle default
             print("No targets available in parameters.")
@@ -156,7 +156,7 @@ class ControllerNode(Node):
         self.initialize_position_log()    
         # ---------------------------------------------
 
-        self.get_logger().info(f"Controller node started. Target commitment: {opt.targets[self.target_commitment]}")
+        self.get_logger().info(f"Controller node started. Target commitment: {opt.targets[self.target_commitment-1]}")
 
     def _run_rt(self):
         asyncio.set_event_loop(self._loop)
@@ -256,14 +256,14 @@ class ControllerNode(Node):
     def update_robot_movement(self):
         """Control loop: hard-turn if needed, else drive straight."""
         with self.pos_lock:
-            if not self.pos_message or 'self' not in self.pos_message or opt.targets[self.target_commitment] not in self.pos_message:
+            if not self.pos_message or 'self' not in self.pos_message or opt.targets[self.target_commitment-1] not in self.pos_message:
                 self.get_logger().warn("Waiting for valid position data...")
                 self.get_logger().warn(f"Current pos_message keys: {list(self.pos_message.keys())}")
                 return
             pos_message_copy = self.pos_message.copy()
 
-        dx = pos_message_copy[opt.targets[self.target_commitment]].position.x - pos_message_copy['self'].position.x 
-        dy = pos_message_copy[opt.targets[self.target_commitment]].position.y - pos_message_copy['self'].position.y 
+        dx = pos_message_copy[opt.targets[self.target_commitment-1]].position.x - pos_message_copy['self'].position.x 
+        dy = pos_message_copy[opt.targets[self.target_commitment-1]].position.y - pos_message_copy['self'].position.y 
         distance = math.hypot(dx, dy)
 
         # Stop if goal reached
@@ -372,7 +372,7 @@ class ControllerNode(Node):
     def log_positions_data(self, time_step):
         """Log all agents' positions for the current timestep."""
         with self.pos_lock:
-            if not self.pos_message or 'self' not in self.pos_message or opt.targets[self.target_commitment] not in self.pos_message:
+            if not self.pos_message or 'self' not in self.pos_message or opt.targets[self.target_commitment-1] not in self.pos_message:
                 self.get_logger().warn("Waiting for valid position data...")
                 self.get_logger().warn(f"Current pos_message keys: {list(self.pos_message.keys())}")
                 return
