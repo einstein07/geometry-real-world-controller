@@ -232,6 +232,8 @@ class ControllerNode(Node):
         self.seq += 1
 
     def listener_cb(self, msg: CommitmentState):
+        if msg.robot_id == self.id:
+            return  # Ignore own messages
         self.commitments[msg.robot_id] = msg.commitment
         self.get_logger().info(
             f'[{self.get_name()}] {msg.robot_id} committed to {msg.commitment}'
@@ -246,8 +248,8 @@ class ControllerNode(Node):
                 if self.commitments:
                     neighbor = random.choice(list(self.commitments.values()))
                     # Check if value is not 0, if 0 keep own commitment
-                    if neighbor.commitment != 0:    
-                        self.target_commitment = neighbor.commitment
+                    if neighbor != 0:    
+                        self.target_commitment = neighbor
                 # Clear commitments to avoid bias
                 self.commitments = {}
             
