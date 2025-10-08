@@ -55,7 +55,8 @@ class Options():
         self.update_rate = int(parameters.get("update_rate", 10)) # time steps
         self.eta = float(parameters.get("eta", 0.1)) # weight for neighbor influence
 
-        self.base_log_dir = parameters.get('log_directory', '~/geometry-logs')
+        self.base_log_dir = os.path.expanduser(parameters.get('log_directory', '~/geometry-logs'))
+        #self.base_log_dir = parameters.get('log_directory', '~/geometry-logs')
         os.makedirs(self.base_log_dir, exist_ok=True)         # If directory does not exist, create it
         self.experiment_name = parameters.get('experiment_name', 'experiment')
 
