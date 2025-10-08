@@ -378,6 +378,7 @@ class ControllerNode(Node):
                 return
               
             self.position_writer.writerow([time_step, self.id, self.pos_message['self'].position.x, self.pos_message['self'].position.y])
+            self.position_log.flush()   # <- critical to ensure data is actually written
 
     def close_positions_log_file(self):
         """Close the agent's log file."""
@@ -391,7 +392,7 @@ class ControllerNode(Node):
         filename = os.path.join(self.base_log_dir, f"{self.experiment_name}_{self.robot_namespace}_{time_stamp}.csv")
         self.opinions_log = open(filename, "w", newline="")
         writer = csv.writer(self.opinions_log)
-        writer.writerow(["Time", "Commitment", "Opinion, Received Opinions"])
+        writer.writerow(["Time", "Commitment", "Opinion", "Received Opinions"])
         self.csv_writer = writer
 
     def log_opinions_data(self, time_step):
@@ -400,6 +401,7 @@ class ControllerNode(Node):
         received_opinions = ";".join(f"{k}:{v}" for k, v in self.commitments.items())        # Log the data to the CSV file
         
         self.csv_writer.writerow([time_step, self.commitment, opinions, received_opinions])
+        self.opinions_log.flush()   # <- critical to ensure data is actually written
         self.my_opinions.clear()
 
     def close_opinions_log_file(self):
@@ -414,6 +416,8 @@ class ControllerNode(Node):
 
         # Close opnions log
         self.close_opinions_log_file()
+
+        self.logger().info("Logs closed successfully.")
 
 
     def destroy_node(self):
