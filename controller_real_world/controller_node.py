@@ -420,9 +420,6 @@ class ControllerNode(Node):
         # Close opnions log
         self.close_opinions_log_file()
 
-        self.logger().info("Logs closed successfully.")
-
-
     def destroy_node(self):
         """Override destroy_node to clean up logs before shutdown."""
         self.logging_cleanup()
