@@ -55,7 +55,7 @@ class Options():
         self.update_rate = int(parameters.get("update_rate", 10)) # time steps
         self.eta = float(parameters.get("eta", 0.1)) # weight for neighbor influence
 
-        self.base_log_dir = parameters.get('log_directory', './logs')
+        self.base_log_dir = parameters.get('log_directory', '~/geometry-logs')
         os.makedirs(self.base_log_dir, exist_ok=True)         # If directory does not exist, create it
         self.experiment_name = parameters.get('experiment_name', 'experiment')
 
@@ -151,7 +151,6 @@ class ControllerNode(Node):
 
         # ----------- Initialize log files -----------
         run_folder = os.path.join(self.base_log_dir, self.experiment_name)
-        os.makedirs(run_folder, exist_ok=True)
         self.initialize_opinions_log()
         self.initialize_position_log()    
         # ---------------------------------------------
@@ -379,13 +378,18 @@ class ControllerNode(Node):
               
             self.position_writer.writerow([time_step, self.id, self.pos_message['self'].position.x, self.pos_message['self'].position.y])
 
+    def close_positions_log_file(self):
+        """Close the agent's log file."""
+        if self.position_log:
+            self.position_log.close()
+
     def initialize_opinions_log(self):
         """Initialize the agent's log file."""
         time_stamp = f"{datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')}" # Default experiment name with timestamp
 
         filename = os.path.join(self.base_log_dir, f"{self.experiment_name}_{self.robot_namespace}_{time_stamp}.csv")
-        self.log_file = open(filename, "w", newline="")
-        writer = csv.writer(self.log_file)
+        self.opinions_log = open(filename, "w", newline="")
+        writer = csv.writer(self.opinions_log)
         writer.writerow(["Time", "Commitment", "Opinion, Received Opinions"])
         self.csv_writer = writer
 
@@ -396,6 +400,25 @@ class ControllerNode(Node):
         
         self.csv_writer.writerow([time_step, self.commitment, opinions, received_opinions])
         self.my_opinions.clear()
+
+    def close_opinions_log_file(self):
+        """Close the agent's log file."""
+        if self.opinions_log:
+            self.opinions_log.close()
+
+    def logging_cleanup(self):
+        """Close all open resources."""
+        # Close position log
+        self.close_positions_log_file()
+
+        # Close opnions log
+        self.close_opinions_log_file()
+
+
+    def destroy_node(self):
+        """Override destroy_node to clean up logs before shutdown."""
+        self.logging_cleanup()
+        super().destroy_node()
 
     @staticmethod
     def wrap_angle(angle):
