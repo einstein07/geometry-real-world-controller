@@ -15,7 +15,11 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('share', package_name), ['parameters.json']),
     ],
-    install_requires=['setuptools'],
+    install_requires=[
+        'setuptools',
+        'tf-transformations',
+        'qtm-rt',
+        ],
     zip_safe=True,
     maintainer='sindiso',
     maintainer_email='mkhsin035@myuct.ac.za',

@@ -19,7 +19,7 @@ import datetime
 import threading
 import numpy as np
 import asyncio
-import qtm
+import qtm_rt as qtm
 import xml.etree.ElementTree as ET
 
 
@@ -50,7 +50,7 @@ class Options():
         self.hard_turn_threshold = float(parameters.get("hard_turn_threshold", 0.17453)) # radians (~10°)
         self.goal_tolerance = float(parameters.get("goal_tolerance", 0.5))
         self.kp_angle = float(parameters.get("kp_angle", 0.5)) # Proportional gain for angle correction # radians (~28.65°)
-        self.qtm_ip = parameters.get("qtm_ip", "10.111.20.20")  # Add QTM server IP to parameters
+        self.qtm_ip = parameters.get("qtm_ip", "134.34.231.207")  # Add QTM server IP to parameters
 
         self.update_rate = int(parameters.get("update_rate", 10)) # time steps
         self.eta = float(parameters.get("eta", 0.1)) # weight for neighbor influence
@@ -139,7 +139,19 @@ class ControllerNode(Node):
         )
         self.robot_namespace = opt.robot_namespace
 
-        self.cmd_pub = self.create_publisher(TwistStamped, f'/{self.robot_namespace}/cmd_vel', 10)
+        ns = (self.robot_namespace or "").strip()
+
+        # remove all leading/trailing slashes so we control formatting
+        ns = ns.strip("/")
+
+        # build a prefix: "" (no namespace) or "/<ns>"
+        prefix = f"/{ns}" if ns else ""
+
+        self.cmd_pub = self.create_publisher(
+            TwistStamped,
+            f"{prefix}/cmd_vel",
+            10
+        )
         # Moves 0.022 meters (2.2 cm) per update at 10 Hz 
         self.timer = self.create_timer(0.1, self.control_loop)
 

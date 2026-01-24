@@ -1,7 +1,7 @@
 {
-    "id": "Turtlebot3",
+    "id": "TB01",
     "robot_namespace": "",
-    "targets": ["Turtlebot4", "Turtlebot7"],
+    "targets": ["TB14", "TB15"],
     "soft_turn_threshold": 0.08727, 
     "hard_turn_threshold": 0.17453,
     "linear_speed": 0.22,
