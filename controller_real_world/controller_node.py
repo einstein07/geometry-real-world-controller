@@ -147,6 +147,8 @@ class ControllerNode(Node):
         # build a prefix: "" (no namespace) or "/<ns>"
         prefix = f"/{ns}" if ns else ""
 
+        self.get_logger().info(f"Using namespace prefix: {prefix}/cmd_vel")
+
         self.cmd_pub = self.create_publisher(
             TwistStamped,
             f"{prefix}/cmd_vel",
@@ -404,7 +406,7 @@ class ControllerNode(Node):
         """Initialize the agent's log file."""
         time_stamp = f"{datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')}" # Default experiment name with timestamp
 
-        filename = os.path.join(self.base_log_dir, f"{self.experiment_name}_{self.robot_namespace}_{time_stamp}.csv")
+        filename = os.path.join(self.base_log_dir, f"{self.experiment_name}_opinions_{time_stamp}.csv")
         self.opinions_log = open(filename, "w", newline="")
         writer = csv.writer(self.opinions_log)
         writer.writerow(["Time", "Commitment", "Opinion", "Received Opinions"])
