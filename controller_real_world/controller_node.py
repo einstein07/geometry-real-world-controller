@@ -111,6 +111,7 @@ class ControllerNode(Node):
         self.pos_message = {}
         self.pos_lock = threading.Lock()
         self.rb_names = []
+        self.rb_indices = []
         self.commitments = {}
         self.commitment = self.target_commitment
         self.my_opinions = []
@@ -192,14 +193,29 @@ class ControllerNode(Node):
                 self.get_logger().error(f"Failed to connect to QTM server at {self.qtm_ip}")
                 return
 
+            self.get_logger().info("Query 6DOF settings XML")
             xml_string = await self._connection.get_parameters(parameters=["6d"])
             if not xml_string:
                 self.get_logger().error("Failed to retrieve 6D parameters from QTM")
                 return
 
             root = ET.fromstring(xml_string)
-            self.rb_names = [body.find("Name").text for body in root.iter("Body")]
-            self.get_logger().info(f"Found rigid bodies: {self.rb_names}")
+            enabled_names = []
+            enabled_indices = []
+            for idx, body in enumerate(root.iter("Body")):
+                name_el = body.find("Name")
+                if name_el is None or not name_el.text:
+                    continue
+                enabled_el = body.find("Enabled")
+                if enabled_el is None or enabled_el.text is None:
+                    continue
+                enabled = enabled_el.text.strip().lower() in {"true", "1", "yes"}
+                if enabled:
+                    enabled_names.append(name_el.text)
+                    enabled_indices.append(idx)
+            self.rb_names = enabled_names
+            self.rb_indices = enabled_indices
+            self.get_logger().info(f"Enabled rigid bodies: {self.rb_names}")
 
             await self._connection.stream_frames(components=["6d"], on_packet=self._on_packet)
         except Exception as e:
@@ -214,10 +230,13 @@ class ControllerNode(Node):
 
             with self.pos_lock:
                 temp = {}
-                for i, ((x, y, z), rotation) in enumerate(rbs):
-                    if i >= len(self.rb_names):
+                for list_idx, body_idx in enumerate(self.rb_indices):
+                    if list_idx >= len(self.rb_names):
                         continue
-                    name = self.rb_names[i]
+                    if body_idx >= len(rbs):
+                        continue
+                    ((x, y, z), rotation) = rbs[body_idx]
+                    name = self.rb_names[list_idx]
                     pose = Pose()
                     pose.position.x = x / 1000.0  # Convert mm to m
                     pose.position.y = y / 1000.0
@@ -376,7 +395,7 @@ class ControllerNode(Node):
 
         self.publish_commitment_state()  # Immediately publish the change
 
-            self.my_opinions.append(self.publishable_commitment)
+        self.my_opinions.append(self.publishable_commitment)
 
         self.cmd_pub.publish(msg)
         #self.get_logger().info(f"Published cmd_vel: linear.x={msg.twist.linear.x}, angular.z={msg.twist.angular.z}")
