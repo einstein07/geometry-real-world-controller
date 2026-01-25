@@ -405,7 +405,8 @@ class ControllerNode(Node):
         self.update_target_commitment()
         self.update_robot_movement()
         self.log_opinions_data(self.counter)
-        self.log_positions_data(self.counter)
+        if not self.arrived_at_goal:
+            self.log_positions_data(self.counter)
         self.counter += 1
 
     def stop_robot(self):
