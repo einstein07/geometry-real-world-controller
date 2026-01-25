@@ -299,13 +299,24 @@ class ControllerNode(Node):
     def update_robot_movement(self):
         """Control loop: hard-turn if needed, else drive straight."""
         with self.pos_lock:
-            if not self.pos_message or 'self' not in self.pos_message or opt.targets[self.target_commitment-1] not in self.pos_message:
+            if not self.pos_message or 'self' not in self.pos_message:
                 self.get_logger().warn("Waiting for valid position data...")
                 self.get_logger().warn(f"Current pos_message keys: {list(self.pos_message.keys())}")
                 return
             pos_message_copy = self.pos_message.copy()
 
-        target_pose = pos_message_copy[opt.targets[self.target_commitment-1]]
+        target_idx = self.target_commitment - 1
+        if target_idx < -len(opt.targets) or target_idx >= len(opt.targets):
+            self.get_logger().warn(f"Invalid target commitment: {self.target_commitment}")
+            return
+
+        target_name = opt.targets[target_idx]
+        if target_name not in pos_message_copy:
+            self.get_logger().warn("Waiting for valid position data...")
+            self.get_logger().warn(f"Missing target pose for: {target_name}")
+            return
+
+        target_pose = pos_message_copy[target_name]
         self_pose = pos_message_copy['self']
 
         dx = target_pose.position.x - self_pose.position.x
@@ -315,9 +326,37 @@ class ControllerNode(Node):
         if (not self.arrived_at_goal) and (distance_to_target < self.goal_tolerance):
             self.arrived_at_goal = True
             self.hold_commitment = True
-            self.get_logger().info("Goal radius reached. Holding commitment and moving to formation ring.")
+            self.get_logger().info("Goal radius reached. Holding commitment and evaluating next behavior.")
 
-        if self.arrived_at_goal:
+        home_mode = False
+        home_turn = None
+        if self.arrived_at_goal and ("L01" in self.rb_names and "L02" in self.rb_names):
+            if target_name == "TB14":
+                home_target_name = "L01"
+                home_turn = "left"
+            elif target_name == "TB15":
+                home_target_name = "L02"
+                home_turn = "right"
+            else:
+                home_target_name = None
+
+            if home_target_name and home_target_name in pos_message_copy:
+                home_mode = True
+                target_pose = pos_message_copy[home_target_name]
+                dx = target_pose.position.x - self_pose.position.x
+                dy = target_pose.position.y - self_pose.position.y
+                distance_to_target = math.hypot(dx, dy)
+
+                if distance_to_target < self.goal_tolerance:
+                    self.stop_robot()
+                    self.publishable_commitment = self.target_commitment
+                    self.publish_commitment_state()
+                    self.my_opinions.append(self.publishable_commitment)
+                    return
+            elif home_target_name:
+                self.get_logger().warn(f"Home target {home_target_name} not in position data; using ring formation.")
+
+        if self.arrived_at_goal and not home_mode:
             self.formation_angle = self.compute_formation_angle_dynamic(pos_message_copy, target_pose)
             ring_x = target_pose.position.x + self.formation_radius * math.cos(self.formation_angle)
             ring_y = target_pose.position.y + self.formation_radius * math.sin(self.formation_angle)
@@ -346,6 +385,12 @@ class ControllerNode(Node):
         # Break ties at ±180° by slightly preferring one direction
         if abs(abs(angle_error) - np.pi) < 0.05:
             angle_error = -np.pi + 0.1  # Always turn right when a,biguous
+
+        if home_mode:
+            if home_turn == "left":
+                angle_error = abs(angle_error)
+            elif home_turn == "right":
+                angle_error = -abs(angle_error)
         #self.get_logger().info(f"Current target commitment: {opt.targets[self.target_commitment]}, Current yaw: {math.degrees(yaw):.2f}° Distance to target: {distance:.2f}, Angle to target: {math.degrees(target_angle):.2f}°, Angle error: {math.degrees(angle_error):.2f}°")
 
         msg = TwistStamped()
@@ -363,11 +408,10 @@ class ControllerNode(Node):
             msg.twist.angular.z = self.angular_speed * (1 if angle_error > 0 else -1)
             msg.twist.linear.x = 0.0
             # during a hard turn, publish commitment 0
-            self.publishable_commitment = 0
-
-            self.publish_commitment_state()  # Immediately publish the change
-
-            self.my_opinions.append(self.publishable_commitment)
+            if not home_mode:
+                self.publishable_commitment = 0
+                self.publish_commitment_state()  # Immediately publish the change
+                self.my_opinions.append(self.publishable_commitment)
 
         elif abs(angle_error) < self.hard_turn_threshold and abs(angle_error) > self.soft_turn_threshold:
             #self.get_logger().info("Soft turn needed")
@@ -377,11 +421,10 @@ class ControllerNode(Node):
             msg.twist.angular.z = max(-self.angular_speed,
                                       min(self.kp_angle * angle_error, self.angular_speed))
             # during a soft turn, publish target commitment
-            self.publishable_commitment = self.target_commitment 
-
-            self.publish_commitment_state()  # Immediately publish the change
-
-            self.my_opinions.append(self.publishable_commitment)
+            if not home_mode:
+                self.publishable_commitment = self.target_commitment 
+                self.publish_commitment_state()  # Immediately publish the change
+                self.my_opinions.append(self.publishable_commitment)
         else:
             #self.get_logger().info("Going straight")
             # Go mostly straight
@@ -430,18 +473,33 @@ class ControllerNode(Node):
         filename = os.path.join(self.base_log_dir, f"{self.experiment_name}_positions_{time_stamp}.csv")
         self.position_log = open(filename, "w", newline="")
         writer = csv.writer(self.position_log)
-        writer.writerow(["Time", "ID", "x", "y"])
+        header = ["Time", "ID", "x", "y"]
+        for target in opt.targets:
+            header.extend([f"{target}_x", f"{target}_y"])
+        writer.writerow(header)
         self.position_writer = writer
 
     def log_positions_data(self, time_step):
         """Log all agents' positions for the current timestep."""
         with self.pos_lock:
-            if not self.pos_message or 'self' not in self.pos_message or opt.targets[self.target_commitment-1] not in self.pos_message:
+            if not self.pos_message or 'self' not in self.pos_message:
                 self.get_logger().warn("Waiting for valid position data...")
                 self.get_logger().warn(f"Current pos_message keys: {list(self.pos_message.keys())}")
                 return
               
-            self.position_writer.writerow([time_step, self.id, self.pos_message['self'].position.x, self.pos_message['self'].position.y])
+            row = [
+                time_step,
+                self.id,
+                self.pos_message['self'].position.x,
+                self.pos_message['self'].position.y,
+            ]
+            for target in opt.targets:
+                pose = self.pos_message.get(target)
+                if pose is None:
+                    row.extend([None, None])
+                else:
+                    row.extend([pose.position.x, pose.position.y])
+            self.position_writer.writerow(row)
             self.position_log.flush()   # <- critical to ensure data is actually written
 
     def close_positions_log_file(self):
