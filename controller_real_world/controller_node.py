@@ -21,6 +21,7 @@ import numpy as np
 import asyncio
 import qtm_rt as qtm
 import xml.etree.ElementTree as ET
+import zlib
 
 
 #==========================================================================
@@ -49,6 +50,8 @@ class Options():
         self.soft_turn_threshold = float(parameters.get("soft_turn_threshold", 0.08727)) # radians (~5°)
         self.hard_turn_threshold = float(parameters.get("hard_turn_threshold", 0.17453)) # radians (~10°)
         self.goal_tolerance = float(parameters.get("goal_tolerance", 0.5))
+        self.formation_radius = float(parameters.get("formation_radius", self.goal_tolerance))
+        self.formation_tolerance = float(parameters.get("formation_tolerance", self.goal_tolerance * 0.2))
         self.kp_angle = float(parameters.get("kp_angle", 0.5)) # Proportional gain for angle correction # radians (~28.65°)
         self.qtm_ip = parameters.get("qtm_ip", "134.34.231.207")  # Add QTM server IP to parameters
 
@@ -96,6 +99,8 @@ class ControllerNode(Node):
         self.linear_speed = opt.linear_speed
         self.angular_speed = opt.angular_speed
         self.goal_tolerance = opt.goal_tolerance
+        self.formation_radius = opt.formation_radius
+        self.formation_tolerance = opt.formation_tolerance
         self.hard_turn_threshold = opt.hard_turn_threshold
         self.soft_turn_threshold = opt.soft_turn_threshold
         self.kp_angle = opt.kp_angle  # Proportional gain for angle correction
@@ -110,6 +115,9 @@ class ControllerNode(Node):
         self.commitment = self.target_commitment
         self.my_opinions = []
         self.quality = 1.0
+        self.arrived_at_goal = False
+        self.hold_commitment = False
+        self.formation_angle = self.compute_formation_angle()
         # -------------
 
         # ----- Logging -----
@@ -254,6 +262,8 @@ class ControllerNode(Node):
         #)
 
     def update_target_commitment(self):
+        if self.arrived_at_goal:
+            return
         if self.counter % self.update_rate == 0:
             if random.random() < self.eta:
                 self.target_commitment = random.randrange(len(opt.targets))
@@ -276,21 +286,35 @@ class ControllerNode(Node):
                 return
             pos_message_copy = self.pos_message.copy()
 
-        dx = pos_message_copy[opt.targets[self.target_commitment-1]].position.x - pos_message_copy['self'].position.x 
-        dy = pos_message_copy[opt.targets[self.target_commitment-1]].position.y - pos_message_copy['self'].position.y 
-        distance = math.hypot(dx, dy)
+        target_pose = pos_message_copy[opt.targets[self.target_commitment-1]]
+        self_pose = pos_message_copy['self']
 
-        # Stop if goal reached
-        if distance < self.goal_tolerance:
-            self.stop_robot()
-            self.get_logger().info("Goal reached!")
-            # Destroy node and shutdown ROS cleanly
-            self.destroy_node()
-            rclpy.shutdown()
-            return
+        dx = target_pose.position.x - self_pose.position.x
+        dy = target_pose.position.y - self_pose.position.y
+        distance_to_target = math.hypot(dx, dy)
+
+        if (not self.arrived_at_goal) and (distance_to_target < self.goal_tolerance):
+            self.arrived_at_goal = True
+            self.hold_commitment = True
+            self.get_logger().info("Goal radius reached. Holding commitment and moving to formation ring.")
+
+        if self.arrived_at_goal:
+            self.formation_angle = self.compute_formation_angle_dynamic(pos_message_copy, target_pose)
+            ring_x = target_pose.position.x + self.formation_radius * math.cos(self.formation_angle)
+            ring_y = target_pose.position.y + self.formation_radius * math.sin(self.formation_angle)
+            dx = ring_x - self_pose.position.x
+            dy = ring_y - self_pose.position.y
+            distance_to_target = math.hypot(dx, dy)
+
+            if distance_to_target < self.formation_tolerance:
+                self.stop_robot()
+                self.publishable_commitment = self.target_commitment
+                self.publish_commitment_state()
+                self.my_opinions.append(self.publishable_commitment)
+                return
 
         # Compute current yaw
-        q = pos_message_copy['self'].orientation
+        q = self_pose.orientation
         _, _, yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
         
         """CCW rotations give negative yaw → Qualisys yaw is 
@@ -347,7 +371,10 @@ class ControllerNode(Node):
             # when going straight, publish target commitment
             self.publishable_commitment = self.target_commitment
 
-            self.publish_commitment_state()  # Immediately publish the change
+        if self.arrived_at_goal:
+            self.publishable_commitment = self.target_commitment
+
+        self.publish_commitment_state()  # Immediately publish the change
 
             self.my_opinions.append(self.publishable_commitment)
 
@@ -438,6 +465,51 @@ class ControllerNode(Node):
         """Override destroy_node to clean up logs before shutdown."""
         self.logging_cleanup()
         super().destroy_node()
+
+    def compute_formation_angle(self):
+        """Deterministic angle for ring placement based on robot id."""
+        seed = zlib.crc32(self.id.encode("utf-8")) & 0xffffffff
+        return (seed / 2**32) * 2 * math.pi
+
+    def compute_formation_angle_dynamic(self, pos_message_copy, target_pose):
+        """Pick the midpoint of the largest angular gap between neighbors."""
+        neighbor_angles = []
+        for name, pose in pos_message_copy.items():
+            if name == 'self':
+                continue
+            if name in opt.targets:
+                continue
+            dx = pose.position.x - target_pose.position.x
+            dy = pose.position.y - target_pose.position.y
+            if dx == 0.0 and dy == 0.0:
+                continue
+            angle = math.atan2(dy, dx)
+            if angle < 0:
+                angle += 2 * math.pi
+            neighbor_angles.append(angle)
+
+        if not neighbor_angles:
+            return self.formation_angle
+
+        neighbor_angles.sort()
+        max_gap = -1.0
+        best_start = neighbor_angles[0]
+
+        for i in range(len(neighbor_angles) - 1):
+            gap = neighbor_angles[i + 1] - neighbor_angles[i]
+            if gap > max_gap:
+                max_gap = gap
+                best_start = neighbor_angles[i]
+
+        wrap_gap = (neighbor_angles[0] + 2 * math.pi) - neighbor_angles[-1]
+        if wrap_gap > max_gap:
+            max_gap = wrap_gap
+            best_start = neighbor_angles[-1]
+
+        mid = best_start + max_gap / 2.0
+        if mid >= 2 * math.pi:
+            mid -= 2 * math.pi
+        return mid
 
     @staticmethod
     def wrap_angle(angle):
