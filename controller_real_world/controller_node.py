@@ -57,6 +57,7 @@ class Options():
 
         self.update_rate = int(parameters.get("update_rate", 10)) # time steps
         self.eta = float(parameters.get("eta", 0.1)) # weight for neighbor influence
+        self.commitment_topic = parameters.get("commitment_topic", "/commitments")
 
         self.base_log_dir = os.path.expanduser(parameters.get('log_directory', '~/geometry-logs'))
         #self.base_log_dir = parameters.get('log_directory', '~/geometry-logs')
@@ -105,6 +106,10 @@ class ControllerNode(Node):
         self.soft_turn_threshold = opt.soft_turn_threshold
         self.kp_angle = opt.kp_angle  # Proportional gain for angle correction
         self.qtm_ip = opt.qtm_ip  # QTM server IP
+        commitment_topic = (opt.commitment_topic or "/commitments").strip()
+        if not commitment_topic.startswith("/"):
+            commitment_topic = f"/{commitment_topic}"
+        self.commitment_topic = commitment_topic
         #------------------------------
 
         # --- State ---
@@ -113,7 +118,8 @@ class ControllerNode(Node):
         self.rb_names = []
         self.rb_indices = []
         self.commitments = {}
-        self.commitment = self.target_commitment
+        # Logging-only mirror of target commitment used in CSV output.
+        self.logged_target_commitment = self.target_commitment
         self.my_opinions = []
         self.quality = 1.0
         self.arrived_at_goal = False
@@ -135,17 +141,18 @@ class ControllerNode(Node):
             depth=1
         )
 
-        self.pub = self.create_publisher(CommitmentState, 'commitments', qos)
+        self.pub = self.create_publisher(CommitmentState, self.commitment_topic, qos)
         self.robot_id = self.id
         self.seq = 0
         
         # Listen to other robots' commitments/opinions
         self.sub = self.create_subscription(
             CommitmentState,
-            'commitments',
+            self.commitment_topic,
             self.listener_cb,
             qos
         )
+        self.get_logger().info(f"Using commitment topic: {self.commitment_topic}")
         self.robot_namespace = opt.robot_namespace
 
         ns = (self.robot_namespace or "").strip()
@@ -285,7 +292,7 @@ class ControllerNode(Node):
             return
         if self.counter % self.update_rate == 0:
             if random.random() < self.eta:
-                self.target_commitment = random.randrange(len(opt.targets))
+                self.target_commitment = random.randrange(len(opt.targets)) + 1
             else:
                 # Pick random neighbor's commitment
                 if self.commitments:
@@ -295,6 +302,7 @@ class ControllerNode(Node):
                         self.target_commitment = neighbor
                 # Clear commitments to avoid bias
                 self.commitments = {}
+            self.logged_target_commitment = self.target_commitment
             
     def update_robot_movement(self):
         """Control loop: hard-turn if needed, else drive straight."""
@@ -522,7 +530,7 @@ class ControllerNode(Node):
         opinions = ";".join(map(str, self.my_opinions))
         received_opinions = ";".join(f"{k}:{v}" for k, v in self.commitments.items())        # Log the data to the CSV file
         
-        self.csv_writer.writerow([time_step, self.commitment, opinions, received_opinions])
+        self.csv_writer.writerow([time_step, self.logged_target_commitment, opinions, received_opinions])
         self.opinions_log.flush()   # <- critical to ensure data is actually written
         self.my_opinions.clear()
 
