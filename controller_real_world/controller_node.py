@@ -445,9 +445,9 @@ class ControllerNode(Node):
 
     def control_loop(self):
         """Update target commitment and execute movement."""
+        self.log_opinions_data(self.counter) #order is important here to log before updating commitment and movement, to capture the state at the beginning of the timestep
         self.update_target_commitment()
         self.update_robot_movement()
-        self.log_opinions_data(self.counter)
         if not self.arrived_at_goal:
             self.log_positions_data(self.counter)
         self.counter += 1
