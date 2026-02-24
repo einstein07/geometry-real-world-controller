@@ -152,6 +152,16 @@ class ControllerNode(Node):
             self.listener_cb,
             qos
         )
+
+        # -------------Listen to ARGoS messages --------------
+        # position subscriber to listen to ARGoS position updates
+        self.pos_sub = self.create_subscription(
+            Position,
+            self.commitment_topic,
+            self.position_listener_cb,
+            qos
+        )
+
         self.get_logger().info(f"Using commitment topic: {self.commitment_topic}")
         self.robot_namespace = opt.robot_namespace
 
