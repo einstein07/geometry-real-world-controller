@@ -1,13 +1,14 @@
 """ROS2 IMPORTS"""
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Header
-from builtin_interfaces.msg import Time
-from geometry_msgs.msg import TwistStamped, Twist, Pose
-from tf_transformations import euler_from_quaternion, quaternion_from_matrix
+from geometry_msgs.msg import Twist, Pose
+from std_msgs.msg import String
+from tf_transformations import euler_from_quaternion
 from controller_msgs.msg import CommitmentState
+from argos3_ros2_bridge.msg import Position
 from ament_index_python.packages import get_package_share_directory
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from rclpy.task import Future
 
 """PYTHON IMPORTS"""
 import os
@@ -18,9 +19,6 @@ import random
 import datetime
 import threading
 import numpy as np
-import asyncio
-import qtm_rt as qtm
-import xml.etree.ElementTree as ET
 import zlib
 
 
@@ -40,29 +38,36 @@ with open(param_file, 'r') as f:
 class Options():
     def __init__(self):
         
-        self.id = parameters["id"]
-        self.robot_namespace = parameters.get("robot_namespace")
+        #self.id = parameters["robot_namespace"].strip("/")
+        #self.robot_namespace = parameters.get("robot_namespace")
         
         self.linear_speed = float(parameters["linear_speed"])
-        self.angular_speed = float(parameters["angular_speed"]) # radians (~5.73°)
+        self.angular_speed = float(np.radians(parameters["angular_speed"])) # Convert from degrees/s to radians/s
 
         self.targets = parameters.get("targets", [])
-        self.soft_turn_threshold = float(parameters.get("soft_turn_threshold", 0.08727)) # radians (~5°)
-        self.hard_turn_threshold = float(parameters.get("hard_turn_threshold", 0.17453)) # radians (~10°)
-        self.goal_tolerance = float(parameters.get("goal_tolerance", 0.5))
-        self.formation_radius = float(parameters.get("formation_radius", self.goal_tolerance))
-        self.formation_tolerance = float(parameters.get("formation_tolerance", self.goal_tolerance * 0.2))
+        self.soft_turn_threshold = float(np.radians(parameters.get("soft_turn_threshold", 5.0))) # radians (~5°)
+        self.hard_turn_threshold = float(np.radians(parameters.get("hard_turn_threshold", 10.0))) # radians (~10°)
+        self.formation_radius = float(parameters.get("formation_radius", 2.5))
         self.kp_angle = float(parameters.get("kp_angle", 0.5)) # Proportional gain for angle correction # radians (~28.65°)
-        self.qtm_ip = parameters.get("qtm_ip", "134.34.231.207")  # Add QTM server IP to parameters
+        #self.qtm_ip = parameters.get("qtm_ip", "134.34.231.207")  # Add QTM server IP to parameters
 
         self.update_rate = int(parameters.get("update_rate", 10)) # time steps
         self.eta = float(parameters.get("eta", 0.1)) # weight for neighbor influence
         self.commitment_topic = parameters.get("commitment_topic", "/commitments")
 
+        self.termination_epsilon = float(parameters.get("termination_epsilon", 0.05))
+        self.patience_threshold = int(parameters.get("patience_threshold", 50))
+        self.improvement_epsilon = float(parameters.get("improvement_epsilon", 0.01))
+        self.position_stale_timeout = float(parameters.get("position_stale_timeout", 3.0))  # seconds
+
         self.base_log_dir = os.path.expanduser(parameters.get('log_directory', '~/geometry-logs'))
-        #self.base_log_dir = parameters.get('log_directory', '~/geometry-logs')
         os.makedirs(self.base_log_dir, exist_ok=True)         # If directory does not exist, create it
         self.experiment_name = parameters.get('experiment_name', 'experiment')
+
+        # "shared"    — all robots publish/subscribe to one shared topic (default)
+        # "per_robot" — each robot publishes on its own topic; others subscribe individually
+        self.commitment_mode = parameters.get('commitment_mode', 'shared')
+        self.robots = parameters.get('robots', [])  # required when commitment_mode == "per_robot"
 
 opt = Options()
 #==================================================================
@@ -81,13 +86,15 @@ commitment_qos = QoSProfile(
 
 class ControllerNode(Node):
     def __init__(self):
-        super().__init__('controller_node_' + opt.id)
+        super().__init__('controller_node')
 
         # --------- Parameters ---------
+        self.id = self.get_namespace().strip("/") # opt.id
+        self.robot_namespace = self.get_namespace() #opt.robot_namespace
         self.update_rate = opt.update_rate   # time steps
         self.counter = random.randint(0, self.update_rate)
         self.eta = opt.eta # weight for neighbor influence
-        self.id = opt.id
+        
         # Pick a random target commitment from the list (if not empty)
         if opt.targets:
             self.target_commitment = random.randrange(len(opt.targets)) +1  # +1 to make sure not starting with 0
@@ -99,13 +106,11 @@ class ControllerNode(Node):
         
         self.linear_speed = opt.linear_speed
         self.angular_speed = opt.angular_speed
-        self.goal_tolerance = opt.goal_tolerance
         self.formation_radius = opt.formation_radius
-        self.formation_tolerance = opt.formation_tolerance
         self.hard_turn_threshold = opt.hard_turn_threshold
         self.soft_turn_threshold = opt.soft_turn_threshold
         self.kp_angle = opt.kp_angle  # Proportional gain for angle correction
-        self.qtm_ip = opt.qtm_ip  # QTM server IP
+        #self.qtm_ip = opt.qtm_ip  # QTM server IP
         commitment_topic = (opt.commitment_topic or "/commitments").strip()
         if not commitment_topic.startswith("/"):
             commitment_topic = f"/{commitment_topic}"
@@ -124,7 +129,14 @@ class ControllerNode(Node):
         self.quality = 1.0
         self.arrived_at_goal = False
         self.hold_commitment = False
-        self.formation_angle = self.compute_formation_angle()
+
+        # --- Termination state ---
+        self.min_distance_achieved = float('inf')
+        self.patience_counter = 0
+        self.terminated = False
+        self.last_position_time = None  # set on first position message
+        self.shutdown_future = Future()
+        # -------------------------
         # -------------
 
         # ----- Logging -----
@@ -133,37 +145,52 @@ class ControllerNode(Node):
         self.get_logger().info(f"Logging data to: {self.base_log_dir}, Experiment name: {self.experiment_name}")
         # -------------------
 
-        # --- ROS Interfaces ---
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-
-        self.pub = self.create_publisher(CommitmentState, self.commitment_topic, qos)
+       
         self.robot_id = self.id
         self.seq = 0
-        
-        # Listen to other robots' commitments/opinions
-        self.sub = self.create_subscription(
-            CommitmentState,
-            self.commitment_topic,
-            self.listener_cb,
-            qos
-        )
+
+        if opt.commitment_mode == 'per_robot':
+            # Each robot publishes on its own topic and subscribes to each neighbour individually.
+            # TRANSIENT_LOCAL + KEEP_LAST(1) means the middleware caches the last value,
+            # so a subscriber always gets the latest even if it missed the publish tick.
+            per_robot_topic = f"/{self.id}/commitment"
+            self.pub = self.create_publisher(CommitmentState, per_robot_topic, commitment_qos)
+            self.neighbor_subs = []
+            for robot_id in opt.robots:
+                if robot_id == self.id:
+                    continue
+                self.neighbor_subs.append(
+                    self.create_subscription(
+                        CommitmentState,
+                        f"/{robot_id}/commitment",
+                        self.listener_cb,
+                        commitment_qos
+                    )
+                )
+            self.get_logger().info(
+                f"commitment_mode=per_robot: publishing on {per_robot_topic}, "
+                f"subscribed to {[f'/{r}/commitment' for r in opt.robots if r != self.id]}"
+            )
+        else:
+            # Shared topic: all robots publish and subscribe to the same topic.
+            self.pub = self.create_publisher(CommitmentState, self.commitment_topic, commitment_qos)
+            self.sub = self.create_subscription(
+                CommitmentState,
+                self.commitment_topic,
+                self.listener_cb,
+                commitment_qos
+            )
+            self.get_logger().info(f"per-robot mode off, commitment_mode=shared: using topic {self.commitment_topic}")
 
         # -------------Listen to ARGoS messages --------------
         # position subscriber to listen to ARGoS position updates
+        self.position_topic = f"/{self.robot_id}/position"  
         self.pos_sub = self.create_subscription(
             Position,
-            self.commitment_topic,
+            self.position_topic,
             self.position_listener_cb,
-            qos
+            1
         )
-
-        self.get_logger().info(f"Using commitment topic: {self.commitment_topic}")
-        self.robot_namespace = opt.robot_namespace
 
         ns = (self.robot_namespace or "").strip()
 
@@ -176,18 +203,19 @@ class ControllerNode(Node):
         self.get_logger().info(f"Using namespace prefix: {prefix}/cmd_vel")
 
         self.cmd_pub = self.create_publisher(
-            TwistStamped,
+            Twist,
             f"{prefix}/cmd_vel",
-            10
+            1
         )
+        self.termination_pub = self.create_publisher(String, '/robot_terminated', 10)
         # Moves 0.022 meters (2.2 cm) per update at 10 Hz 
         self.timer = self.create_timer(0.1, self.control_loop)
 
         # Setup QTM connection in a separate thread
-        self._loop = asyncio.new_event_loop()
+        """self._loop = asyncio.new_event_loop()
         self._connection = None
         self._thread = threading.Thread(target=self._run_rt, daemon=True)
-        self._thread.start()
+        self._thread.start()"""
         # ----------------------
 
         # ----------- Initialize log files -----------
@@ -196,9 +224,9 @@ class ControllerNode(Node):
         self.initialize_position_log()    
         # ---------------------------------------------
 
-        self.get_logger().info(f"Controller node started. Target commitment: {opt.targets[self.target_commitment-1]}")
+        self.get_logger().debug(f"Controller node started. Target commitment: {opt.targets[self.target_commitment-1]}")
 
-    def _run_rt(self):
+    """def _run_rt(self):
         asyncio.set_event_loop(self._loop)
         self._loop.run_until_complete(self._rt_protocol())
         self._loop.run_forever()
@@ -276,7 +304,7 @@ class ControllerNode(Node):
 
                 self.pos_message = temp
         except Exception as e:
-            self.get_logger().error(f"Error processing QTM packet: {str(e)}")
+            self.get_logger().error(f"Error processing QTM packet: {str(e)}")"""
 
     def publish_commitment_state(self):
         msg = CommitmentState()
@@ -293,9 +321,15 @@ class ControllerNode(Node):
         if msg.robot_id == self.id:
             return  # Ignore own messages
         self.commitments[msg.robot_id] = msg.commitment
-        #self.get_logger().info(
-        #    f'[{self.get_name()}] {msg.robot_id} committed to {msg.commitment}'
-        #)
+        self.get_logger().debug(
+            f'[{self.get_name()}] {msg.robot_id} committed to {msg.commitment}'
+        )
+
+    def position_listener_cb(self, msg: Position):
+        self.pos_message = msg
+        self.last_position_time = self.get_clock().now()
+        self.get_logger().debug(f"Current pos_message: {(self.pos_message)}")
+
 
     def update_target_commitment(self):
         if self.arrived_at_goal:
@@ -316,78 +350,61 @@ class ControllerNode(Node):
             
     def update_robot_movement(self):
         """Control loop: hard-turn if needed, else drive straight."""
-        with self.pos_lock:
-            if not self.pos_message or 'self' not in self.pos_message:
-                self.get_logger().warn("Waiting for valid position data...")
-                self.get_logger().warn(f"Current pos_message keys: {list(self.pos_message.keys())}")
-                return
-            pos_message_copy = self.pos_message.copy()
+        if not self.pos_message:
+            self.get_logger().debug("Waiting for valid position data...")
+            return
 
         target_idx = self.target_commitment - 1
-        if target_idx < -len(opt.targets) or target_idx >= len(opt.targets):
+        if target_idx < 0 or target_idx >= len(opt.targets):
             self.get_logger().warn(f"Invalid target commitment: {self.target_commitment}")
             return
 
-        target_name = opt.targets[target_idx]
-        if target_name not in pos_message_copy:
-            self.get_logger().warn("Waiting for valid position data...")
-            self.get_logger().warn(f"Missing target pose for: {target_name}")
-            return
+        
 
-        target_pose = pos_message_copy[target_name]
-        self_pose = pos_message_copy['self']
+        target_pose = opt.targets[target_idx]
+        self_pose = self.pos_message
 
-        dx = target_pose.position.x - self_pose.position.x
-        dy = target_pose.position.y - self_pose.position.y
+        dx = target_pose[0] - self_pose.position.x
+        dy = target_pose[1] - self_pose.position.y
         distance_to_target = math.hypot(dx, dy)
 
-        if (not self.arrived_at_goal) and (distance_to_target < self.goal_tolerance):
+        # Update best distance and patience counter
+        if distance_to_target < self.min_distance_achieved - opt.improvement_epsilon:
+            self.min_distance_achieved = distance_to_target
+            self.patience_counter = 0
+        else:
+            self.patience_counter += 1
+
+        # Condition 1: essentially at target
+        direct_arrival = distance_to_target < opt.termination_epsilon
+
+        # Condition 2: stuck (no improvement for patience_threshold steps) and within formation_radius
+        stuck_within_radius = (
+            self.patience_counter >= opt.patience_threshold
+            and distance_to_target < self.formation_radius
+        )
+
+        if direct_arrival or stuck_within_radius:
             self.arrived_at_goal = True
-            self.hold_commitment = True
-            self.get_logger().info("Goal radius reached. Holding commitment and evaluating next behavior.")
+            self.stop_robot()
+            self.publishable_commitment = self.target_commitment
+            self.publish_commitment_state()
+            self.my_opinions.append(self.publishable_commitment)
+            reason = "direct arrival" if direct_arrival else "stuck within radius"
+            self.get_logger().info(
+                f"[{self.id}] Terminating ({reason}): "
+                f"distance={distance_to_target:.3f}, "
+                f"formation_radius={self.formation_radius}, "
+                f"patience={self.patience_counter}"
+            )
+            self.publish_terminated()
+            self.terminated = True
+            return
 
-        home_mode = False
-        home_turn = None
-        if self.arrived_at_goal and ("L01" in self.rb_names and "L02" in self.rb_names):
-            if target_name == "TB14":
-                home_target_name = "L01"
-                home_turn = "left"
-            elif target_name == "TB15":
-                home_target_name = "L02"
-                home_turn = "right"
-            else:
-                home_target_name = None
-
-            if home_target_name and home_target_name in pos_message_copy:
-                home_mode = True
-                target_pose = pos_message_copy[home_target_name]
-                dx = target_pose.position.x - self_pose.position.x
-                dy = target_pose.position.y - self_pose.position.y
-                distance_to_target = math.hypot(dx, dy)
-
-                if distance_to_target < self.goal_tolerance:
-                    self.stop_robot()
-                    self.publishable_commitment = self.target_commitment
-                    self.publish_commitment_state()
-                    self.my_opinions.append(self.publishable_commitment)
-                    return
-            elif home_target_name:
-                self.get_logger().warn(f"Home target {home_target_name} not in position data; using ring formation.")
-
-        if self.arrived_at_goal and not home_mode:
-            self.formation_angle = self.compute_formation_angle_dynamic(pos_message_copy, target_pose)
-            ring_x = target_pose.position.x + self.formation_radius * math.cos(self.formation_angle)
-            ring_y = target_pose.position.y + self.formation_radius * math.sin(self.formation_angle)
-            dx = ring_x - self_pose.position.x
-            dy = ring_y - self_pose.position.y
-            distance_to_target = math.hypot(dx, dy)
-
-            if distance_to_target < self.formation_tolerance:
-                self.stop_robot()
-                self.publishable_commitment = self.target_commitment
-                self.publish_commitment_state()
-                self.my_opinions.append(self.publishable_commitment)
-                return
+        if self.arrived_at_goal:
+            self.stop_robot()
+            return
+    
 
         # Compute current yaw
         q = self_pose.orientation
@@ -395,128 +412,142 @@ class ControllerNode(Node):
         
         """CCW rotations give negative yaw → Qualisys yaw is 
         opposite sign to the atan2 convention), convert by negating:"""
-        yaw = -yaw
+        #yaw = -yaw # do not negate rn
 
         # Desired heading
         target_angle = math.atan2(dy, dx)
         angle_error = self.wrap_angle(target_angle - yaw)
         # Break ties at ±180° by slightly preferring one direction
-        if abs(abs(angle_error) - np.pi) < 0.05:
+        if abs(abs(angle_error) - np.pi) < 0.005:
             angle_error = -np.pi + 0.1  # Always turn right when a,biguous
 
-        if home_mode:
-            if home_turn == "left":
-                angle_error = abs(angle_error)
-            elif home_turn == "right":
-                angle_error = -abs(angle_error)
+        
         #self.get_logger().info(f"Current target commitment: {opt.targets[self.target_commitment]}, Current yaw: {math.degrees(yaw):.2f}° Distance to target: {distance:.2f}, Angle to target: {math.degrees(target_angle):.2f}°, Angle error: {math.degrees(angle_error):.2f}°")
 
-        msg = TwistStamped()
-        msg.header = Header()
-        msg.header.frame_id = 'base_link'  # Set the frame_id
-        msg.header.stamp = self.get_clock().now().to_msg()  # Set the timestamp
-        msg.twist.linear.y = 0.0
-        msg.twist.linear.z = 0.0
-        msg.twist.angular.x = 0.0
-        msg.twist.angular.y = 0.0
+        msg = Twist()
+        msg.linear.y = 0.0
+        msg.linear.z = 0.0
+        msg.angular.x = 0.0
+        msg.angular.y = 0.0
 
         if abs(angle_error) > self.hard_turn_threshold:
             #self.get_logger().info("Hard turn needed")
             # Turn in place for very large errors
-            msg.twist.angular.z = self.angular_speed * (1 if angle_error > 0 else -1)
-            msg.twist.linear.x = 0.0
+            msg.angular.z = self.angular_speed * (1 if angle_error > 0 else -1)
+            msg.linear.x = 0.0
             # during a hard turn, publish commitment 0
-            if not home_mode:
-                self.publishable_commitment = 0
-                self.publish_commitment_state()  # Immediately publish the change
-                self.my_opinions.append(self.publishable_commitment)
+            self.publishable_commitment = 0
 
         elif abs(angle_error) < self.hard_turn_threshold and abs(angle_error) > self.soft_turn_threshold:
             #self.get_logger().info("Soft turn needed")
             # Curve while moving
-            msg.twist.linear.x = self.linear_speed
+            msg.linear.x = self.linear_speed
             # Proportional controller for angular velocity
-            msg.twist.angular.z = max(-self.angular_speed,
-                                      min(self.kp_angle * angle_error, self.angular_speed))
+            msg.angular.z = max(-self.angular_speed,
+                                min(self.kp_angle * angle_error, self.angular_speed))
             # during a soft turn, publish target commitment
-            if not home_mode:
-                self.publishable_commitment = self.target_commitment 
-                self.publish_commitment_state()  # Immediately publish the change
-                self.my_opinions.append(self.publishable_commitment)
+            self.publishable_commitment = self.target_commitment
         else:
             #self.get_logger().info("Going straight")
             # Go mostly straight
-            msg.twist.linear.x = self.linear_speed
-            msg.twist.angular.z = 0.0
+            msg.linear.x = self.linear_speed
+            msg.angular.z = 0.0
             # when going straight, publish target commitment
             self.publishable_commitment = self.target_commitment
 
         if self.arrived_at_goal:
             self.publishable_commitment = self.target_commitment
 
-        self.publish_commitment_state()  # Immediately publish the change
-
+        self.publish_commitment_state()
         self.my_opinions.append(self.publishable_commitment)
 
         self.cmd_pub.publish(msg)
-        #self.get_logger().info(f"Published cmd_vel: linear.x={msg.twist.linear.x}, angular.z={msg.twist.angular.z}")
+        #self.get_logger().info(f"Published cmd_vel: linear.x={msg.linear.x}, angular.z={msg.angular.z}")
 
     def control_loop(self):
         """Update target commitment and execute movement."""
-        self.log_opinions_data(self.counter) #order is important here to log before updating commitment and movement, to capture the state at the beginning of the timestep
+        if self.terminated:
+            return
+
+        # Staleness check: if position data has gone silent (e.g. ARGoS/bridge
+        # terminated before us) and our last known distance was within
+        # formation_radius, self-terminate rather than hanging indefinitely.
+        if (self.last_position_time is not None
+                and not self.arrived_at_goal
+                and self.min_distance_achieved < self.formation_radius):
+            elapsed = (self.get_clock().now() - self.last_position_time).nanoseconds * 1e-9
+            if elapsed > opt.position_stale_timeout:
+                self.get_logger().warn(
+                    f"[{self.id}] Position data stale for {elapsed:.1f}s "
+                    f"(last known distance={self.min_distance_achieved:.3f}). Terminating."
+                )
+                self.arrived_at_goal = True
+                self.terminated = True
+                self.stop_robot()
+                self.publish_terminated()
+                self.timer.cancel()
+                self.shutdown_future.set_result(True)
+                return
+
+        received_snapshot = dict(self.commitments)
         self.update_target_commitment()
         self.update_robot_movement()
+        if self.my_opinions:
+            self.log_opinions_data(self.counter, received_snapshot)
         if not self.arrived_at_goal:
             self.log_positions_data(self.counter)
         self.counter += 1
 
+        if self.terminated:
+            self.timer.cancel()
+            self.get_logger().info(f"[{self.id}] Shutting down node.")
+            self.shutdown_future.set_result(True)
+
+    def publish_terminated(self):
+        """Signal to the termination monitor that this robot is done."""
+        msg = String()
+        msg.data = self.id
+        self.termination_pub.publish(msg)
+
     def stop_robot(self):
         """Publish zero velocities."""
-        msg = TwistStamped()
-        msg.header = Header()
-        msg.header.frame_id = 'base_link'
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.twist.linear.x = 0.0
-        msg.twist.linear.y = 0.0
-        msg.twist.linear.z = 0.0
-        msg.twist.angular.x = 0.0
-        msg.twist.angular.y = 0.0
-        msg.twist.angular.z = 0.0
+        msg = Twist()
+        msg.linear.x = 0.0
+        msg.linear.y = 0.0
+        msg.linear.z = 0.0
+        msg.angular.x = 0.0
+        msg.angular.y = 0.0
+        msg.angular.z = 0.0
         self.cmd_pub.publish(msg)
 
     def initialize_position_log(self):
         """Initialize the position log file."""
         time_stamp = f"{datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')}" # Default experiment name with timestamp
 
-        filename = os.path.join(self.base_log_dir, f"{self.experiment_name}_positions_{time_stamp}.csv")
+        filename = os.path.join(self.base_log_dir, f"{self.experiment_name}_{self.id}_positions_{time_stamp}.csv")
         self.position_log = open(filename, "w", newline="")
         writer = csv.writer(self.position_log)
         header = ["Time", "ID", "x", "y"]
-        for target in opt.targets:
-            header.extend([f"{target}_x", f"{target}_y"])
+        """for target in opt.targets:
+            header.extend([f"{target}_x", f"{target}_y"])"""
         writer.writerow(header)
         self.position_writer = writer
 
     def log_positions_data(self, time_step):
         """Log all agents' positions for the current timestep."""
         with self.pos_lock:
-            if not self.pos_message or 'self' not in self.pos_message:
-                self.get_logger().warn("Waiting for valid position data...")
-                self.get_logger().warn(f"Current pos_message keys: {list(self.pos_message.keys())}")
+            if not self.pos_message:
                 return
               
             row = [
                 time_step,
                 self.id,
-                self.pos_message['self'].position.x,
-                self.pos_message['self'].position.y,
+                self.pos_message.position.x,
+                self.pos_message.position.y,
             ]
-            for target in opt.targets:
-                pose = self.pos_message.get(target)
-                if pose is None:
-                    row.extend([None, None])
-                else:
-                    row.extend([pose.position.x, pose.position.y])
+            """for target in opt.targets:
+                x, y, z  = opt.targets[opt.targets.index(target)]
+                row.extend([x, y])"""
             self.position_writer.writerow(row)
             self.position_log.flush()   # <- critical to ensure data is actually written
 
@@ -529,18 +560,17 @@ class ControllerNode(Node):
         """Initialize the agent's log file."""
         time_stamp = f"{datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')}" # Default experiment name with timestamp
 
-        filename = os.path.join(self.base_log_dir, f"{self.experiment_name}_opinions_{time_stamp}.csv")
+        filename = os.path.join(self.base_log_dir, f"{self.experiment_name}_{self.id}_opinions_{time_stamp}.csv")
         self.opinions_log = open(filename, "w", newline="")
         writer = csv.writer(self.opinions_log)
         writer.writerow(["Time", "Commitment", "Opinion", "Received Opinions"])
         self.csv_writer = writer
 
-    def log_opinions_data(self, time_step):
+    def log_opinions_data(self, time_step, received_snapshot):
         """Log the agent's current state."""
         opinions = ";".join(map(str, self.my_opinions))
-        received_opinions = ";".join(f"{k}:{v}" for k, v in self.commitments.items())        # Log the data to the CSV file
-        
-        self.csv_writer.writerow([time_step, self.logged_target_commitment, opinions, received_opinions])
+        received_opinions = ";".join(f"{k}:{v}" for k, v in received_snapshot.items())
+        self.csv_writer.writerow([time_step, self.publishable_commitment, opinions, received_opinions])
         self.opinions_log.flush()   # <- critical to ensure data is actually written
         self.my_opinions.clear()
 
@@ -562,50 +592,6 @@ class ControllerNode(Node):
         self.logging_cleanup()
         super().destroy_node()
 
-    def compute_formation_angle(self):
-        """Deterministic angle for ring placement based on robot id."""
-        seed = zlib.crc32(self.id.encode("utf-8")) & 0xffffffff
-        return (seed / 2**32) * 2 * math.pi
-
-    def compute_formation_angle_dynamic(self, pos_message_copy, target_pose):
-        """Pick the midpoint of the largest angular gap between neighbors."""
-        neighbor_angles = []
-        for name, pose in pos_message_copy.items():
-            if name == 'self':
-                continue
-            if name in opt.targets:
-                continue
-            dx = pose.position.x - target_pose.position.x
-            dy = pose.position.y - target_pose.position.y
-            if dx == 0.0 and dy == 0.0:
-                continue
-            angle = math.atan2(dy, dx)
-            if angle < 0:
-                angle += 2 * math.pi
-            neighbor_angles.append(angle)
-
-        if not neighbor_angles:
-            return self.formation_angle
-
-        neighbor_angles.sort()
-        max_gap = -1.0
-        best_start = neighbor_angles[0]
-
-        for i in range(len(neighbor_angles) - 1):
-            gap = neighbor_angles[i + 1] - neighbor_angles[i]
-            if gap > max_gap:
-                max_gap = gap
-                best_start = neighbor_angles[i]
-
-        wrap_gap = (neighbor_angles[0] + 2 * math.pi) - neighbor_angles[-1]
-        if wrap_gap > max_gap:
-            max_gap = wrap_gap
-            best_start = neighbor_angles[-1]
-
-        mid = best_start + max_gap / 2.0
-        if mid >= 2 * math.pi:
-            mid -= 2 * math.pi
-        return mid
 
     @staticmethod
     def wrap_angle(angle):
@@ -615,7 +601,7 @@ class ControllerNode(Node):
 def main(args=None):
     rclpy.init()
     controller_node = ControllerNode()
-    rclpy.spin(controller_node)
+    rclpy.spin_until_future_complete(controller_node, controller_node.shutdown_future)
     controller_node.destroy_node()
     rclpy.shutdown()
 
