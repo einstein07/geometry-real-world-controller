@@ -1,0 +1,160 @@
+<?xml version="1.0" ?>
+<argos-configuration>
+
+  <!-- ************************* -->
+  <!-- * General configuration * -->
+  <!-- ************************* -->
+<framework>
+  <system threads="0" />
+  <experiment length="600"
+              ticks_per_second="10"
+              random_seed="124" />
+</framework>
+
+<!--  <loop_functions library="libargos_ros_bridge.so"
+                  label="sync_metrics_loop_functions"
+                  output="sync_metrics_turtlebot.csv"
+                  enabled="true"
+                  write_header="true"
+                  flush_interval="100" />
+-->
+  <!-- Disabled: bridge termination fires before controllers can self-terminate.
+       Controllers now self-terminate via per-robot distance/stuck logic.
+       ARGoS runs until experiment length (see <experiment length=...>) as a hard cap.
+  <loop_functions library="libargos_ros_bridge.so"
+                label="swarm_center_of_mass_termination_loop_functions"
+                radius="1.0"
+                planar_distance="true" />
+  -->
+
+  <!-- *************** -->
+  <!-- * Controllers * -->
+  <!-- *************** -->
+  <controllers>
+
+    <argos_ros_bot_controller id="argos_ros_bot"
+                                 library="libargos_ros_bridge.so">
+      <actuators>
+        <differential_steering implementation="default" />
+        <leds implementation="default" medium="leds" />
+      </actuators>
+      <sensors>
+        <positioning implementation="default" />
+        <turtlebot4_ground implementation="rot_z_only" />
+        <turtlebot4_proximity implementation="default" show_rays="false" />
+        <turtlebot4_lidar implementation="default" num_readings="360" show_rays="false" />
+        <turtlebot4_light implementation="rot_z_only" show_rays="false" />
+        <turtlebot4_colored_blob_omnidirectional_camera implementation="rot_z_only" medium="leds" />
+      </sensors>
+      <!-- The wheel radius and half_base values are specific to the TurtleBot4 robot, see argos3-turtlebot4/argos3/plugins/robots/turtlebot4/simulator/turtlebot4_measures.cpp -->
+      <params multiple_domains="true"
+              nodes_per_domain="50"
+              ros_domain_id="0"
+              half_baseline="0.1175"
+              wheel_radius="0.036"
+              lockstep_control="true"
+              enable_time_synchronization="true"
+              command_timeout_ms="100" />
+    </argos_ros_bot_controller>
+
+  </controllers>
+
+  <!-- *********************** -->
+  <!-- * Arena configuration * -->
+  <!-- *********************** -->
+  <arena size="40,40,2" center="0,0,0.5">
+    <floor id="floor"
+        source="loop_functions"
+        pixels_per_meter="50" />
+        
+    <box id="wall_north" size="40,0.1,0.5" movable="false">
+      <body position="0,20,0" orientation="0,0,0"/>
+    </box>	
+    <box id="wall_south" size="40,0.1,0.5" movable="false">
+    <body position="0,-20,0" orientation="0,0,0"/>
+    </box>
+    <box id="wall_east" size="0.1,40,0.5" movable="false">
+    <body position="20,0,0" orientation="0,0,0"/>
+    </box>
+    <box id="wall_west" size="0.1,40,0.5" movable="false">
+    <body position="-20,0,0" orientation="0,0,0"/>
+    </box>
+
+    <!--  <light id="yellowLight"
+            position="2,18,0.1"
+            orientation="0,0,0"
+            color="yellow"
+            intensity="100.0"
+            medium="leds" /> -->
+    <light id="yellowLight"
+            position="4,18,0.4"
+            orientation="0,0,0"
+            color="yellow"
+            intensity="100.0"
+            medium="leds">
+    </light>
+    <light id="greenLight"
+            position="-4,18,0.4"
+            orientation="0,0,0"
+            color="green"
+            intensity="100.0"
+            medium="leds"> 
+    </light> 
+    <!--<cylinder id="green_puck" height="0.05" radius="0.05" mass="0.1"
+                    movable="true">
+            <body position="-1,-17,0" orientation="0,0,0"/>
+            <leds medium="leds">
+              <led offset="0,0,0.06" anchor="origin" color="green"
+                  intensity="1.0"/>
+            </leds>
+          </cylinder> -->
+      <!--
+          You can distribute entities randomly. Here, we distribute
+          the entities in this way:
+          - the position is uniformly distributed on the ground, in the
+            square whose corners are (4,4) and (5,5)
+          - the orientations are non-zero only when rotating around Z and
+            chosen from a gaussian distribution, whose mean is zero degrees
+            and standard deviation is 360 degrees.
+      -->
+    
+    <distribute>
+      <position method="uniform" min="-1,-18,0" max="1,-16,0" />
+      <orientation method="gaussian" mean="90,0,0" std_dev="0,0,0" />
+      <entity quantity="20" max_trials="100">
+        <turtlebot4 id="bot" rab_range="100" omnidirectional_camera_aperture="89.99" >
+          <controller config="argos_ros_bot" />
+        </turtlebot4>
+      </entity>
+    </distribute>
+
+  </arena>
+
+  <!-- ******************* -->
+  <!-- * Physics engines * -->
+  <!-- ******************* -->
+  <physics_engines>
+    <dynamics2d id="dyn2d" />
+  </physics_engines>
+
+  <!-- ********* -->
+  <!-- * Media * -->
+  <!-- ********* -->
+  <media>
+    <led id="leds" />
+  </media>
+
+  <!-- ****************** -->
+  <!-- * Visualization * -->
+  <!-- ****************** -->
+  <visualization>
+    <qt-opengl>
+      <camera>
+        <placements>
+          <placement index="0" position="3.47447,8.20587,3.42167" look_at="3.94263,7.5512,2.82817" up="0.345221,-0.48276,0.804839" lens_focal_length="20" />
+        </placements>
+      </camera>
+    </qt-opengl>
+  </visualization>
+
+</argos-configuration>
