@@ -23,8 +23,8 @@ PARAMS_SOURCE="${SCRIPT_DIR}/../config/parameters.json"
 # Installed share copy — what the nodes actually read at startup
 PARAMS_INSTALLED="${WS_DIR}/install/controller_real_world/share/controller_real_world/parameters.json"
 
-BRIDGE_SCRIPT="${SCRIPT_DIR}/launch-argos-bridge.sh"
-CONTROLLERS_SCRIPT="${SCRIPT_DIR}/launch-controllers.sh"
+BRIDGE_SCRIPT="${SCRIPT_DIR}/launch-argos-bridge-cluster.sh"
+CONTROLLERS_SCRIPT="${SCRIPT_DIR}/launch-controllers-cluster.sh"
 # ──────────────────────────────────────────────────────────────
 
 # ─────────────────── source ROS2 workspace ───────────────────
