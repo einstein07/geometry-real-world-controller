@@ -13,7 +13,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
-        (os.path.join('share', package_name), ['parameters.json']),
+        (os.path.join('share', package_name), ['config/parameters.json']),
     ],
     install_requires=[
         'setuptools',
@@ -29,6 +29,7 @@ setup(
     entry_points={
         'console_scripts': [
             'controller_node = controller_real_world.controller_node:main',
+            'termination_monitor = controller_real_world.termination_monitor_node:main',
         ],
     },
 )
