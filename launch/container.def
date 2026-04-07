@@ -1,0 +1,37 @@
+Bootstrap: docker
+From: osrf/ros:humble-desktop-full
+
+%post
+
+    . /opt/ros/humble/setup.sh
+    apt-get update && apt-get -y upgrade
+    apt-get install -y lsb-release wget gnupg
+    apt-get install -y cmake libfreeimage-dev libfreeimageplus-dev \
+    qtbase5-dev qtchooser qt5-qmake qtbase5-dev-tools freeglut3-dev libxi-dev libxmu-dev liblua5.3-dev \
+    lua5.3 doxygen graphviz libgraphviz-dev asciidoc
+    apt-get install -y libgsl-dev
+    apt install -y bc
+    apt install -y time
+    apt install -y ros-humble-rmw-cyclonedds-cpp
+    git clone https://github.com/ilpincy/argos3.git argos3
+    cd argos3 && mkdir build_simulator && cd build_simulator && cmake ../src && make
+    make doc && make install
+    mkdir -p /opt/ros2_ws/src
+    cd /opt/ros2_ws/src
+    git clone https://github.com/CPS-Konstanz/argos3-ros2-bridge.git
+    git clone -b feature/tb4-control --single-branch https://github.com/einstein07/geometry-real-world-controller.git
+    git clone https://github.com/CPS-Konstanz/argos3-turtlebot4.git
+    cd argos3-turtlebot4
+    ./build.sh           
+    ./build.sh install   
+    cd ../..
+    colcon build --packages-select argos3_ros2_bridge
+    mkdir -p install/argos3_ros2_bridge/lib/argos3_ros2_bridge
+    . install/setup.sh
+    colcon build --packages-select controller_real_world
+    cd src/geometry-real-world-controller/launch/
+    chmod +x *.sh
+
+%runscript
+    . /opt/ros2_ws/install/setup.sh
+    bash /opt/ros2_ws/src/geometry-real-world-controller/launch/update_rate_sweep_cluster.sh

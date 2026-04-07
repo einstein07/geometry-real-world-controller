@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-RUNS_PER_RATE="${1:-20}"
+RUNS_PER_RATE="${1:-1}"
 LOG_ROOT="${2:-/mnt}"
 RATES=(1 2 3 4 5 6 7 8 9 10)
 
