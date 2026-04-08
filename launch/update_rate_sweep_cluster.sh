@@ -13,6 +13,16 @@
 
 set -euo pipefail
 
+# bwUniCluster/Apptainer-safe temp directory handling.
+# Slurm may export TMPDIR to a host scratch path that does not exist inside
+# the container, which causes plain `mktemp` to fail. Fall back to /tmp.
+if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR}" ]; then
+    :
+else
+    export TMPDIR=/tmp
+fi
+mkdir -p "${TMPDIR}"
+
 RUNS_PER_RATE="${1:-1}"
 LOG_ROOT="${2:-/mnt}"
 RATES=(1 2 3 4 5 6 7 8 9 10)
@@ -52,7 +62,7 @@ update_params() {
     local rate="$1"
     local log_dir="$2"
 
-    python3 - <<EOF
+    python3 - <<EOF2
 import json
 from pathlib import Path
 
@@ -73,7 +83,7 @@ for path in paths:
     with path.open("w") as f:
         json.dump(params, f, indent=4)
         f.write("\n")
-EOF
+EOF2
 }
 
 mkdir -p "${LOG_ROOT}"
@@ -81,6 +91,7 @@ mkdir -p "${LOG_ROOT}"
 log "Starting update_rate sweep."
 log "Runs per rate: ${RUNS_PER_RATE}"
 log "Log root: ${LOG_ROOT}"
+log "Using TMPDIR: ${TMPDIR}"
 
 FAILED_RATES=()
 
