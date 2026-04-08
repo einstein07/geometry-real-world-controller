@@ -14,7 +14,8 @@ From: osrf/ros:humble-desktop-full
     apt install -y time
     apt install -y ros-humble-rmw-cyclonedds-cpp
     apt install -y ros-humble-tf-transformations
-    pip install tf-transformations numpy
+    apt install -y python3-pip
+    python3 -m pip install tf-transformations numpy
     git clone https://github.com/ilpincy/argos3.git argos3
     cd argos3 && mkdir build_simulator && cd build_simulator && cmake ../src && make
     make doc && make install
@@ -23,6 +24,7 @@ From: osrf/ros:humble-desktop-full
     git clone https://github.com/CPS-Konstanz/argos3-ros2-bridge.git
     git clone -b feature/tb4-control --single-branch https://github.com/einstein07/geometry-real-world-controller.git
     git clone https://github.com/CPS-Konstanz/argos3-turtlebot4.git
+    git clone https://github.com/einstein07/commitment-msgs.git
     cd argos3-turtlebot4
     ./build.sh
     cd build
@@ -32,6 +34,7 @@ From: osrf/ros:humble-desktop-full
     mkdir -p install/argos3_ros2_bridge/lib/argos3_ros2_bridge
     . install/setup.sh
     colcon build --packages-select controller_real_world
+    colcon build --packages-select controller_msgs
     cd /opt/ros2_ws/src/geometry-real-world-controller/launch
     chmod +x *.sh
 

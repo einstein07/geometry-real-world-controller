@@ -42,7 +42,7 @@ if ! python3 -c "import tf_transformations; import numpy" 2>/dev/null; then
     log "Missing Python deps — installing tf-transformations + numpy to ${TMPDIR}/pylocal ..."
     TF_PKG_DIR="${TMPDIR}/pylocal"
     mkdir -p "${TF_PKG_DIR}"
-    pip install tf-transformations numpy --target "${TF_PKG_DIR}" --quiet
+    python3 -m pip install tf-transformations numpy --target "${TF_PKG_DIR}" --quiet
     export PYTHONPATH="${TF_PKG_DIR}:${PYTHONPATH:-}"
     log "Dependencies installed. PYTHONPATH updated."
 fi
