@@ -18,13 +18,27 @@ BETWEEN_RUNS_WAIT=5           # seconds between consecutive runs
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_DIR="/opt/ros2_ws"
-# Source config — always kept in sync
+# Source config — read-only inside the container; used only to seed a writable copy.
 PARAMS_SOURCE="${SCRIPT_DIR}/../config/parameters.json"
-# Installed share copy — what the nodes actually read at startup
-PARAMS_INSTALLED="${WS_DIR}/install/controller_real_world/share/controller_real_world/parameters.json"
 
 BRIDGE_SCRIPT="${SCRIPT_DIR}/launch-argos-bridge-cluster.sh"
 CONTROLLERS_SCRIPT="${SCRIPT_DIR}/launch-controllers-cluster.sh"
+# ──────────────────────────────────────────────────────────────
+
+# ──── writable params file ────────────────────────────────────
+# The container filesystem at /opt/ is read-only (Apptainer on bwUniCluster).
+# If a caller (e.g. update_rate_sweep_cluster.sh) already created a writable
+# copy and exported PARAMS_FILE, reuse it.  Otherwise create one now.
+_TMPDIR="${TMPDIR:-/tmp}"
+mkdir -p "${_TMPDIR}"
+if [ -z "${PARAMS_FILE:-}" ]; then
+    PARAMS_FILE="$(mktemp --tmpdir="${_TMPDIR}" params.XXXXXX.json)"
+    cp "${PARAMS_SOURCE}" "${PARAMS_FILE}"
+    export PARAMS_FILE
+    _OWN_PARAMS_FILE=1
+else
+    _OWN_PARAMS_FILE=0
+fi
 # ──────────────────────────────────────────────────────────────
 
 # ─────────────────── source ROS2 workspace ───────────────────
@@ -58,34 +72,36 @@ cleanup() {
     log "Cleanup done."
 }
 
-# Clean up on Ctrl-C or unexpected exit
-trap 'log "Interrupted — running final cleanup."; cleanup; exit 1' SIGINT SIGTERM
+_exit_handler() {
+    log "Interrupted — running final cleanup."
+    cleanup
+    if [ "${_OWN_PARAMS_FILE}" -eq 1 ]; then
+        rm -f "${PARAMS_FILE}"
+    fi
+    exit 1
+}
+trap '_exit_handler' SIGINT SIGTERM
 # ──────────────────────────────────────────────────────────────
 
 # ─────────── update experiment_name in parameters.json ───────
-# Writes to both the source config and the installed share copy.
-# The installed copy may be a regular file (not a symlink) if colcon build
-# was ever run without --symlink-install, so we update both explicitly.
+# Writes only to the writable PARAMS_FILE — never to read-only paths.
 set_experiment_name() {
     local name="$1"
     python3 - <<EOF
 import json
 
-def update(path, name):
-    with open(path, "r") as f:
-        params = json.load(f)
-    params["experiment_name"] = name
-    with open(path, "w") as f:
-        json.dump(params, f, indent=4)
-
-update("${PARAMS_SOURCE}", "${name}")
-update("${PARAMS_INSTALLED}", "${name}")
+with open("${PARAMS_FILE}", "r") as f:
+    params = json.load(f)
+params["experiment_name"] = name
+with open("${PARAMS_FILE}", "w") as f:
+    json.dump(params, f, indent=4)
 EOF
 }
 # ──────────────────────────────────────────────────────────────
 
 log "Starting automated experiment batch: ${NUM_RUNS} runs, ${NUM_ROBOTS} robots."
 log "Timeout per run: ${RUN_TIMEOUT}s"
+log "Using params file: ${PARAMS_FILE}"
 log ""
 
 FAILED_RUNS=()
@@ -102,7 +118,6 @@ for run in $(seq 1 "${NUM_RUNS}"); do
     cleanup
 
     # 2. Tag this run in parameters.json
-    #    No rebuild needed — install/share symlinks directly to the source file.
     set_experiment_name "${RUN_LABEL}"
     log "Experiment name set to '${RUN_LABEL}'"
 
@@ -158,3 +173,7 @@ else
     log "Runs with issues: ${FAILED_RUNS[*]}"
 fi
 echo "============================================="
+
+if [ "${_OWN_PARAMS_FILE}" -eq 1 ]; then
+    rm -f "${PARAMS_FILE}"
+fi

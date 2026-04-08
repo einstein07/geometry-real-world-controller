@@ -22,10 +22,19 @@ def generate_launch_description():
     ld = LaunchDescription()
 EOF
 
+# If a writable params file was provided by the caller (e.g. run_experiments_cluster.sh),
+# pass it as a command-line argument to each controller node.
+# The container filesystem at /opt/ is read-only so we must never rely on
+# the installed share copy being up-to-date.
+NODE_ARGS_FRAGMENT=""
+if [ -n "${PARAMS_FILE:-}" ]; then
+    NODE_ARGS_FRAGMENT=", arguments=[\"${PARAMS_FILE}\"]"
+fi
+
 for ((i=0; i<n; i++)); do
     namespace="bot$i"
     domain_id=$((i / 50))  # Group by 50: 0-49 = 0, 50-99 = 1, etc.
-    echo "    ${namespace} = Node(package=\"controller_real_world\", executable=\"controller_node\", name=\"controller_real_world\", output=\"screen\", namespace=\"${namespace}\", additional_env={\"ROS_DOMAIN_ID\": \"${domain_id}\"})" >> "${LAUNCH_FILE}"
+    echo "    ${namespace} = Node(package=\"controller_real_world\", executable=\"controller_node\", name=\"controller_real_world\", output=\"screen\", namespace=\"${namespace}\"${NODE_ARGS_FRAGMENT}, additional_env={\"ROS_DOMAIN_ID\": \"${domain_id}\"})" >> "${LAUNCH_FILE}"
     echo "    ld.add_action(${namespace})" >> "${LAUNCH_FILE}"
 done
 

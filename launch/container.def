@@ -22,14 +22,15 @@ From: osrf/ros:humble-desktop-full
     git clone -b feature/tb4-control --single-branch https://github.com/einstein07/geometry-real-world-controller.git
     git clone https://github.com/CPS-Konstanz/argos3-turtlebot4.git
     cd argos3-turtlebot4
-    ./build.sh           
-    ./build.sh install   
-    cd ../..
+    ./build.sh
+    cd build
+    make install
+    cd /opt/ros2_ws
     colcon build --packages-select argos3_ros2_bridge
     mkdir -p install/argos3_ros2_bridge/lib/argos3_ros2_bridge
     . install/setup.sh
     colcon build --packages-select controller_real_world
-    cd src/geometry-real-world-controller/launch/
+    cd /opt/ros2_ws/src/geometry-real-world-controller/launch
     chmod +x *.sh
 
 %runscript

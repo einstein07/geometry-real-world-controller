@@ -7,8 +7,8 @@
 #   bash run_update_rate_sweep.sh [runs_per_rate] [log_root]
 #
 # Defaults:
-#   runs_per_rate = 20
-#   log_root      = /home/sindiso/geometry-logs/update-rate-sweep
+#   runs_per_rate = 1
+#   log_root      = /mnt
 #
 
 set -euo pipefail
@@ -28,35 +28,24 @@ LOG_ROOT="${2:-/mnt}"
 RATES=(1 2 3 4 5 6 7 8 9 10)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WS_DIR="/opt/ros2_ws"
+# Source config — read-only inside the container; never written to.
 PARAMS_SOURCE="${SCRIPT_DIR}/../config/parameters.json"
-PARAMS_INSTALLED="${WS_DIR}/install/controller_real_world/share/controller_real_world/parameters.json"
 RUN_SCRIPT="${SCRIPT_DIR}/run_experiments_cluster.sh"
 
 log() { echo "[update-rate-sweep] $*"; }
 
-backup_source="$(mktemp)"
-cp "${PARAMS_SOURCE}" "${backup_source}"
+# Create ONE writable working copy in TMPDIR for the entire sweep.
+# The container filesystem at /opt/ is read-only (Apptainer on bwUniCluster),
+# so we must never write back to PARAMS_SOURCE or the installed share copy.
+WORKING_PARAMS="$(mktemp --tmpdir="${TMPDIR}" params.XXXXXX.json)"
+cp "${PARAMS_SOURCE}" "${WORKING_PARAMS}"
+export PARAMS_FILE="${WORKING_PARAMS}"
+log "Working params file: ${WORKING_PARAMS}"
 
-backup_installed=""
-if [ -f "${PARAMS_INSTALLED}" ]; then
-    backup_installed="$(mktemp)"
-    cp "${PARAMS_INSTALLED}" "${backup_installed}"
-fi
-
-restore_configs() {
-    if [ -f "${backup_source}" ]; then
-        cp "${backup_source}" "${PARAMS_SOURCE}"
-        rm -f "${backup_source}"
-    fi
-
-    if [ -n "${backup_installed}" ] && [ -f "${backup_installed}" ] && [ -f "${PARAMS_INSTALLED}" ]; then
-        cp "${backup_installed}" "${PARAMS_INSTALLED}"
-        rm -f "${backup_installed}"
-    fi
+cleanup_working_params() {
+    rm -f "${WORKING_PARAMS}"
 }
-
-trap restore_configs EXIT INT TERM
+trap cleanup_working_params EXIT INT TERM
 
 update_params() {
     local rate="$1"
@@ -68,21 +57,17 @@ from pathlib import Path
 
 rate = int("${rate}")
 log_dir = "${log_dir}"
-paths = [Path("${PARAMS_SOURCE}")]
-installed = Path("${PARAMS_INSTALLED}")
-if installed.exists():
-    paths.append(installed)
+path = Path("${WORKING_PARAMS}")
 
-for path in paths:
-    with path.open("r") as f:
-        params = json.load(f)
+with path.open("r") as f:
+    params = json.load(f)
 
-    params["update_rate"] = rate
-    params["log_directory"] = log_dir
+params["update_rate"] = rate
+params["log_directory"] = log_dir
 
-    with path.open("w") as f:
-        json.dump(params, f, indent=4)
-        f.write("\n")
+with path.open("w") as f:
+    json.dump(params, f, indent=4)
+    f.write("\n")
 EOF2
 }
 
