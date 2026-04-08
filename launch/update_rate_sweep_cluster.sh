@@ -23,7 +23,7 @@ else
 fi
 mkdir -p "${TMPDIR}"
 
-RUNS_PER_RATE="${1:-1}"
+RUNS_PER_RATE="${1:-20}"
 LOG_ROOT="${2:-/mnt}"
 RATES=(1 2 3 4 5 6 7 8 9 10)
 
@@ -33,6 +33,20 @@ PARAMS_SOURCE="${SCRIPT_DIR}/../config/parameters.json"
 RUN_SCRIPT="${SCRIPT_DIR}/run_experiments_cluster.sh"
 
 log() { echo "[update-rate-sweep] $*"; }
+
+# ── runtime dependency check ──────────────────────────────────
+# tf_transformations may be missing from older container builds.
+# Install it to a writable directory in TMPDIR and add it to PYTHONPATH
+# so controller nodes can import it without touching the read-only /opt/.
+if ! python3 -c "import tf_transformations; import numpy" 2>/dev/null; then
+    log "Missing Python deps — installing tf-transformations + numpy to ${TMPDIR}/pylocal ..."
+    TF_PKG_DIR="${TMPDIR}/pylocal"
+    mkdir -p "${TF_PKG_DIR}"
+    pip install tf-transformations numpy --target "${TF_PKG_DIR}" --quiet
+    export PYTHONPATH="${TF_PKG_DIR}:${PYTHONPATH:-}"
+    log "Dependencies installed. PYTHONPATH updated."
+fi
+# ──────────────────────────────────────────────────────────────
 
 # Create ONE writable working copy in TMPDIR for the entire sweep.
 # The container filesystem at /opt/ is read-only (Apptainer on bwUniCluster),

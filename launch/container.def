@@ -13,6 +13,8 @@ From: osrf/ros:humble-desktop-full
     apt install -y bc
     apt install -y time
     apt install -y ros-humble-rmw-cyclonedds-cpp
+    apt install -y ros-humble-tf-transformations
+    pip install tf-transformations numpy
     git clone https://github.com/ilpincy/argos3.git argos3
     cd argos3 && mkdir build_simulator && cd build_simulator && cmake ../src && make
     make doc && make install
