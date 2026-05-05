@@ -27,9 +27,9 @@ import zlib
 #======================define parameters=============================
 package_name = 'controller_real_world'
 
-param_file = os.path.join(
-    get_package_share_directory(package_name),
-    'parameters.json'
+param_file = (
+    os.environ.get('PARAMS_FILE')
+    or os.path.join(get_package_share_directory(package_name), 'parameters.json')
 )
 
 with open(param_file, 'r') as f:
