@@ -33,7 +33,7 @@ fi
 
 for ((i=0; i<n; i++)); do
     namespace="bot$i"
-    domain_id=$((i / 50))  # Group by 50: 0-49 = 0, 50-99 = 1, etc.
+    domain_id="${ROS_DOMAIN_ID:-0}"  # Inherited from SLURM task; isolates this task's graph.
     echo "    ${namespace} = Node(package=\"controller_real_world\", executable=\"controller_node\", name=\"controller_real_world\", output=\"screen\", namespace=\"${namespace}\"${NODE_ARGS_FRAGMENT}, additional_env={\"ROS_DOMAIN_ID\": \"${domain_id}\"})" >> "${LAUNCH_FILE}"
     echo "    ld.add_action(${namespace})" >> "${LAUNCH_FILE}"
 done
